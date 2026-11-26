@@ -142,7 +142,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   nothing above its own `Roll` until it is chosen) was the rule of [Stoppable §3] for one
   ballot; with R4d routing does not need it, and paros has no pause (Pierre, 2026-11-25, §4.7.3).
 - The floor at `Held` (R7) uses Scenario 3 of Matchmaker Paxos for the compaction floor
-  (departure 2), to check in step 6.
+  (departure 2), checked by `specs/tla/held-floor/`. Its tally is built: a sealed replica that
+  holds its whole segment answers each beat with `Message::SegmentHeld`, and the leader marks
+  the segment `Held` (`collector::HeldTally`, `ColocatedNode::held_segments`) once more than
+  `F` replicas of the fold reported it (`AcceptorConfig::is_held_by`, `F` the `f` of the
+  acceptor configuration, D8) and its end is in the chain. The decided `Hold` (D9) comes
+  next.
 
 ## 10. Pitfalls
 

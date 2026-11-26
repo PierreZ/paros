@@ -16,6 +16,7 @@ mod election;
 mod feedback;
 mod gc;
 mod handoff;
+mod held;
 mod helpers;
 mod invariants;
 mod learn;
@@ -45,7 +46,7 @@ pub use self::replication::HEARTBEAT_TICKS;
 pub use self::roll::{RollRefusal, RollResult};
 use crate::acceptor::Acceptor;
 use crate::belief::Belief;
-use crate::collector::Collector;
+use crate::collector::{Collector, HeldTally};
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
@@ -489,6 +490,12 @@ pub struct ColocatedNode {
     /// chosen command), so a routed `Commit` carries this ballot, never the
     /// record's. Kept only with matchmakers (R10).
     choosing: BTreeMap<Slot, Ballot>,
+    /// The count of the replicas that hold each sealed segment, with what
+    /// the fold says of each segment whose `Roll` this node noted, and the
+    /// segments it marked `Held` (R7 of §4.7). Volatile: the replicas
+    /// report again on each beat. `None` on plain Multi-Paxos, always.
+    /// Boxed: it is rare and the node is held inside the driver's future.
+    held: Option<Box<HeldTally>>,
     /// Publishes to send this batch, drained via
     /// [`Ready::segment_publishes`] over the matchmaker wire.
     pending_segment_publishes: Vec<(MatchmakerId, SegmentPublish)>,
@@ -651,6 +658,9 @@ impl ColocatedNode {
                 watermark,
                 config_since,
             } => self.on_pre_read_ack(from, ctx, watermark, config_since),
+            Message::SegmentHeld { from, segment, end } => {
+                self.on_segment_held(from, segment, end);
+            }
         }
         // A `Prepare` or an `Accept` can raise the promise above the basis
         // of an open read: such a read ends here, before anything serves it.
@@ -1343,7 +1353,8 @@ impl ColocatedNode {
                 | Message::Relinquish { from, .. }
                 | Message::Heartbeat { from, .. }
                 | Message::HeartbeatAck { from, .. }
-                | Message::PreReadAck { from, .. } => *from == me,
+                | Message::PreReadAck { from, .. }
+                | Message::SegmentHeld { from, .. } => *from == me,
                 Message::Commit { from, .. } => *from == Party::Node(me),
                 Message::Accept { leader, .. } => *leader == me,
             }),

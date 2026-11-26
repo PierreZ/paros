@@ -39,6 +39,9 @@ pub struct Publisher {
     generation: MatchmakerGeneration,
     /// The publishes no majority acked yet, by the segment they seal.
     pending: BTreeMap<SegmentId, Pending>,
+    /// The segments whose publish a majority of one generation acked: their
+    /// end is in every later read of the chain (`ChainCarried`).
+    completed: BTreeSet<SegmentId>,
 }
 
 impl Publisher {
@@ -52,6 +55,7 @@ impl Publisher {
         let publisher = Self {
             generation,
             pending: BTreeMap::new(),
+            completed: BTreeSet::new(),
         };
         assert!(!publisher.is_pending(), "a new tally holds no publish");
         assert!(
@@ -94,9 +98,30 @@ impl Publisher {
         self.pending.keys().copied()
     }
 
+    /// Whether a majority of one generation acked the publish of the end
+    /// of `segment` since this tally started: the end is in the chain.
+    /// Volatile, like the tally: after a restart the node publishes again.
+    ///
+    /// # Panics
+    ///
+    /// If a completed publish still waits: a programmer error.
+    #[must_use]
+    pub fn is_published(&self, segment: SegmentId) -> bool {
+        let published = self.completed.contains(&segment);
+        assert!(
+            !published || !self.pending.contains_key(&segment),
+            "a completed publish waits no more"
+        );
+        assert!(
+            self.completed.iter().all(|k| !self.pending.contains_key(k)),
+            "no publish is both pending and completed"
+        );
+        published
+    }
+
     /// Hold a publish that the node's walk made. A second publish of the same
     /// segment is the same publish (every field is a function of the chosen
-    /// log) and changes nothing.
+    /// log) and changes nothing, and so is one that already completed.
     ///
     /// # Panics
     ///
@@ -105,6 +130,9 @@ impl Publisher {
     pub fn note(&mut self, mut publish: SegmentPublish) {
         publish.generation = self.generation;
         let sealed = publish.sealed;
+        if self.completed.contains(&sealed) {
+            return;
+        }
         if let Some(held) = self.pending.get(&sealed) {
             assert!(
                 held.publish == publish,
@@ -160,10 +188,7 @@ impl Publisher {
         {
             return None;
         }
-        let pending = self
-            .pending
-            .get_mut(&ack.sealed)
-            .filter(|pending| pending.publish.journal == ack.journal)?;
+        let pending = self.pending.get_mut(&ack.sealed)?;
         pending.acked.insert(ack.matchmaker);
         assert!(
             pending.acked.iter().all(|m| set.contains(*m)),
@@ -173,6 +198,7 @@ impl Publisher {
             return None;
         }
         self.pending.remove(&ack.sealed);
+        self.completed.insert(ack.sealed);
         assert!(
             !self.pending.contains_key(&ack.sealed),
             "a completed publish waits no more"

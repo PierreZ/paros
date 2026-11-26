@@ -172,7 +172,6 @@ fn a_reconfiguration_refused_by_a_quorum_as_naming_a_retired_node_is_abandoned()
     let set = nodes[0].matchmaker_set().cloned().expect("a set");
     let refuse = |node: &mut ColocatedNode, mm: u64| {
         node.on_match_reply(MatchReply {
-            journal: J,
             matchmaker: MatchmakerId(mm),
             to: NodeId(0),
             ballot: b,
@@ -223,7 +222,6 @@ fn a_node_refused_as_retired_itself_rejoins() {
     let set = nodes[0].matchmaker_set().cloned().expect("a set");
     assert_eq!(nodes[0].retire_mark().incarnation, 0);
     let step = nodes[0].on_match_reply(MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(0),
         ballot: b,
@@ -413,7 +411,6 @@ fn a_campaign_with_an_unstaged_rejoin_stages_it_on_a_retired_refusal() {
     // A matchmaker refuses the campaign: this node is retired there.
     let set = n.matchmaker_set().cloned().expect("a set");
     let _ = n.on_match_reply(MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(1),
         ballot: b,

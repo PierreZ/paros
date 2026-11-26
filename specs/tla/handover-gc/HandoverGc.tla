@@ -27,7 +27,7 @@
 (*                                                                           *)
 (* Not in the model: the decree that chooses the successor (one choice, in   *)
 (* one step), lost matchmaker state, the effective configuration scalar,     *)
-(* the size of the successor set, more than one journal.                     *)
+(* the size of the successor set. A matchmaker serves one journal.           *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS M0, M1, NB, Collector, PoolLag, CloseFloor, FrozenRegisters

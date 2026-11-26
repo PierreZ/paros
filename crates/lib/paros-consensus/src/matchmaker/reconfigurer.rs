@@ -58,13 +58,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigureRequest, raise_effective,
+    JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply,
+    ReconfigureRequest, raise_effective,
 };
 use super::{Retirement, SuccessorDecree};
-use crate::contract::limits::Limits;
 use crate::decree::{AcceptFold, DecreePromise};
-use crate::journal::JournalId;
 use crate::journal::chain::merge_chain;
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{Ballot, NodeId};
@@ -90,12 +88,8 @@ pub enum ReconfigurerPhase {
         /// The proposed successor membership; `None` for a *finish*, which
         /// proposes the members that answered the freeze.
         target: Option<Vec<MatchmakerId>>,
-        /// The frozen registries collected so far, every journal's per
-        /// member (#190), from the members whose report is whole.
-        acks: BTreeMap<MatchmakerId, BTreeMap<JournalId, JournalRegistry>>,
-        /// The pages of a report still cut short (#439), per member: the
-        /// journals so far and the cursor its next page starts after.
-        partial: BTreeMap<MatchmakerId, (BTreeMap<JournalId, JournalRegistry>, JournalId)>,
+        /// The frozen registries collected so far, one per member.
+        acks: BTreeMap<MatchmakerId, JournalRegistry>,
         /// The highest decree ballot any frozen member reported promised:
         /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
@@ -107,11 +101,8 @@ pub enum ReconfigurerPhase {
         old: MatchmakerSet,
         /// The reconstruction, addressed to every member of the proposed set.
         bootstrap: PendingBootstrap,
-        /// Members that durably hold it whole.
+        /// Members that durably hold it.
         acks: BTreeSet<MatchmakerId>,
-        /// The last journal each member reported it holds of a bootstrap
-        /// still cut short (#439): its next page starts after it.
-        held: BTreeMap<MatchmakerId, Option<JournalId>>,
         /// The stop quorum's decree floor, carried to the decree.
         decree_floor: Ballot,
     },
@@ -356,18 +347,6 @@ fn mint(round: &mut u64, unpersisted: &mut Option<u64>, floor: u64) -> u64 {
     *round
 }
 
-/// Whether every journal's reconstructed history sits at or above its own
-/// reconstructed watermark.
-fn holds_nothing_below(registries: &BTreeMap<JournalId, JournalRegistry>) -> bool {
-    registries.values().all(|registry| {
-        registry
-            .history
-            .keys()
-            .next()
-            .is_none_or(|b| *b >= registry.gc_watermark)
-    })
-}
-
 /// What [`MatchmakerReconfigurer::close_stop`] produced: the successor's
 /// initial state, and how many ballots the frozen registries disagreed on
 /// while it was unioned.
@@ -405,29 +384,20 @@ pub struct MatchmakerReconfigurer {
     /// Driver ticks since the running phase last made progress (see
     /// [`MatchmakerReconfigurer::stalled_for`]).
     elapsed: u64,
-    /// The limits this reconfigurer runs under, fixed at construction
-    /// ([`MatchmakerReconfigurer::new`]): the most journals one bootstrap
-    /// page carries (#439), [`Limits::registry_page`].
-    limits: Limits,
-    /// The smallest page a frozen member cut its report at in this handover
-    /// (#439): the bootstrap is paged no wider, so a successor meets pages
-    /// no larger than the set's own members send.
-    cut: Option<usize>,
 }
 
 impl MatchmakerReconfigurer {
-    /// An idle reconfigurer for `node`, that pages its bootstraps by
-    /// `limits.registry_page` and opens its next decree above `round`, the
+    /// An idle reconfigurer for `node`, that opens its next decree above
+    /// `round`, the
     /// decree round on disk (0 when the node never wrote one).
     ///
     /// # Panics
     ///
-    /// If `limits` breaks [`Limits::assert_valid`], or an assertion on its
-    /// own invariants, preconditions or postconditions fails: a programmer
-    /// error, never an operating condition.
+    /// If an assertion on its own invariants, preconditions or
+    /// postconditions fails: a programmer error, never an operating
+    /// condition.
     #[must_use]
-    pub fn new(node: NodeId, round: u64, limits: Limits) -> Self {
-        limits.assert_valid();
+    pub fn new(node: NodeId, round: u64) -> Self {
         let reconfigurer = Self {
             node,
             round,
@@ -436,8 +406,6 @@ impl MatchmakerReconfigurer {
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
-            limits,
-            cut: None,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
         assert!(
@@ -446,12 +414,6 @@ impl MatchmakerReconfigurer {
         );
         reconfigurer.assert_invariants();
         reconfigurer
-    }
-
-    /// The limits this reconfigurer runs under.
-    #[must_use]
-    pub fn limits(&self) -> Limits {
-        self.limits
     }
 
     /// The handover's per-phase invariants: who may have answered, which
@@ -473,21 +435,15 @@ impl MatchmakerReconfigurer {
                 assert!(self.elapsed == 0, "an idle reconfigurer's clock is stopped");
             }
             ReconfigurerPhase::Stopping {
-                old,
-                target,
-                acks,
-                partial,
-                ..
+                old, target, acks, ..
             } => {
                 assert!(
                     acks.keys().all(|m| old.contains(*m)),
                     "only members of the replaced generation acknowledge its freeze"
                 );
                 assert!(
-                    partial
-                        .keys()
-                        .all(|m| old.contains(*m) && !acks.contains_key(m)),
-                    "a report still cut short is a member's that is not whole"
+                    acks.values().all(JournalRegistry::holds_nothing_below),
+                    "a counted freeze report holds nothing below its watermark"
                 );
                 assert!(
                     target.as_ref().is_none_or(|t| !t.is_empty()),
@@ -498,18 +454,8 @@ impl MatchmakerReconfigurer {
                 old,
                 bootstrap,
                 acks,
-                held,
                 ..
             } => {
-                assert!(
-                    bootstrap.complete,
-                    "a bootstrap is paged out of a whole reconstruction"
-                );
-                assert!(
-                    held.keys()
-                        .all(|m| bootstrap.set.contains(*m) && !acks.contains(m)),
-                    "a bootstrap still cut short is a member's that is not whole"
-                );
                 assert!(
                     bootstrap.set.generation == old.generation.next(),
                     "a bootstrap proposes the next generation"
@@ -519,7 +465,7 @@ impl MatchmakerReconfigurer {
                     "only members of the proposed set acknowledge its bootstrap"
                 );
                 assert!(
-                    holds_nothing_below(&bootstrap.registries),
+                    bootstrap.registry.holds_nothing_below(),
                     "a reconstruction holds nothing below its watermark"
                 );
             }
@@ -696,11 +642,9 @@ impl MatchmakerReconfigurer {
             old: current.clone(),
             target,
             acks: BTreeMap::new(),
-            partial: BTreeMap::new(),
             decree_floor: Ballot::zero(),
         };
         self.elapsed = 0;
-        self.cut = None;
         self.resend();
         assert!(
             matches!(self.phase, ReconfigurerPhase::Stopping { .. }),
@@ -815,64 +759,54 @@ impl MatchmakerReconfigurer {
         if !old.has_quorum(&acks.keys().copied().collect()) {
             return None;
         }
-        // The reconstruction (§5), per journal of the set (#190): the
-        // maximum watermark, the union of every frozen registry at or above
-        // it, and the maximum effective configuration. A ballot reported
-        // twice carries one registration (the write-once ledger); the first
-        // seen is kept.
-        let mut registries: BTreeMap<JournalId, JournalRegistry> = BTreeMap::new();
+        // The reconstruction (§5): the maximum watermark, the union of
+        // every frozen registry at or above it, and the maximum effective
+        // configuration. A ballot reported twice carries one registration
+        // (the write-once ledger); the first seen is kept.
+        let mut registry = JournalRegistry::default();
         for frozen in acks.values() {
-            for (journal, registry) in frozen {
-                let held = registries.entry(*journal).or_default();
-                held.gc_watermark = held.gc_watermark.max(registry.gc_watermark);
-                // The effective configuration is a monotone scalar, not a
-                // record: the maximum over the frozen members carries the
-                // acceptor set in force into the successor generation even
-                // when its own registration was collected long ago.
-                if let Some((ballot, config)) = &registry.effective {
-                    raise_effective(&mut held.effective, *ballot, config);
-                }
-                // The retirement records merge over the frozen members
-                // (#1002 (retire fence gaps)): the later incarnation wins,
-                // and at one incarnation a retirement wins. A node retires
-                // only once every member of the old set holds it, so every
-                // frozen quorum reports it.
-                Retirement::merge_all(&mut held.retired, &registry.retired);
-                // The chain of segments merges over the frozen members (R5):
-                // a publish completed at a majority of the old set, which
-                // meets every frozen quorum.
-                merge_chain(&mut held.segments, &registry.segments);
+            registry.gc_watermark = registry.gc_watermark.max(frozen.gc_watermark);
+            // The effective configuration is a monotone scalar, not a
+            // record: the maximum over the frozen members carries the
+            // acceptor set in force into the successor generation even
+            // when its own registration was collected long ago.
+            if let Some((ballot, config)) = &frozen.effective {
+                raise_effective(&mut registry.effective, *ballot, config);
             }
+            // The retirement records merge over the frozen members
+            // (#1002 (retire fence gaps)): the later incarnation wins,
+            // and at one incarnation a retirement wins. A node retires
+            // only once every member of the old set holds it, so every
+            // frozen quorum reports it.
+            Retirement::merge_all(&mut registry.retired, &frozen.retired);
+            // The chain of segments merges over the frozen members (R5):
+            // a publish completed at a majority of the old set, which
+            // meets every frozen quorum.
+            merge_chain(&mut registry.segments, &frozen.segments);
         }
         let mut disagreements: u64 = 0;
+        let gc_watermark = registry.gc_watermark;
         for frozen in acks.values() {
-            for (journal, registry) in frozen {
-                let held = registries
-                    .get_mut(journal)
-                    .expect("every reported journal is held");
-                let gc_watermark = held.gc_watermark;
-                for (ballot, registration) in registry.history.range(gc_watermark..) {
-                    match held.history.entry(*ballot) {
-                        std::collections::btree_map::Entry::Vacant(slot) => {
-                            slot.insert(registration.clone());
-                        }
-                        std::collections::btree_map::Entry::Occupied(slot) => {
-                            if slot.get() != registration {
-                                // Two frozen registries hold one ballot with
-                                // different bytes. The successor generation
-                                // can only carry one, so the first seen
-                                // stays — but that *durably* narrows the
-                                // ledger, and the leader's own union keeps
-                                // both, so the count is reported rather than
-                                // dropped (review finding S2c).
-                                disagreements = disagreements.saturating_add(1);
-                            }
+            for (ballot, registration) in frozen.history.range(gc_watermark..) {
+                match registry.history.entry(*ballot) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(registration.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(slot) => {
+                        if slot.get() != registration {
+                            // Two frozen registries hold one ballot with
+                            // different bytes. The successor generation
+                            // can only carry one, so the first seen
+                            // stays — but that *durably* narrows the
+                            // ledger, and the leader's own union keeps
+                            // both, so the count is reported rather than
+                            // dropped (review finding S2c).
+                            disagreements = disagreements.saturating_add(1);
                         }
                     }
                 }
             }
         }
-        registries.retain(|_, registry| !registry.is_blank());
         // A finish proposes the members that answered the freeze, thinned to
         // an odd count (`odd_answerers`).
         let target = target
@@ -881,25 +815,21 @@ impl MatchmakerReconfigurer {
         assert!(!target.is_empty(), "a reconstruction proposes a member");
         let bootstrap = PendingBootstrap {
             set: MatchmakerSet::new(old.generation.next(), target),
-            registries,
-            complete: true,
+            registry,
         };
         assert!(
-            holds_nothing_below(&bootstrap.registries),
+            bootstrap.registry.holds_nothing_below(),
             "a reconstruction holds nothing below its watermark"
         );
-        // #190: every journal a frozen member reported is carried, so no
-        // journal of the set loses its registry across the handover.
-        // Mutation proof: a reconstruction that drops one journal trips this
-        // assertion; with it off, the handover model checker fails on its
-        // first seed ("an activated registry carries the complete
-        // reconstruction").
+        // Every registration a frozen member reported at or above the
+        // reconstructed floor is carried, so no registration a later Phase
+        // 1 needs is lost across the handover.
         assert!(
-            acks.values()
-                .flat_map(BTreeMap::iter)
-                .filter(|(_, registry)| !registry.is_blank())
-                .all(|(journal, _)| bootstrap.registries.contains_key(journal)),
-            "a reconstruction carries every reported journal"
+            acks.values().all(|frozen| frozen
+                .history
+                .range(gc_watermark..)
+                .all(|(ballot, _)| bootstrap.registry.history.contains_key(ballot))),
+            "a reconstruction carries every reported registration above its floor"
         );
         assert!(
             bootstrap.set.generation == old.generation.next(),
@@ -909,7 +839,6 @@ impl MatchmakerReconfigurer {
             old: old.clone(),
             bootstrap: bootstrap.clone(),
             acks: BTreeSet::new(),
-            held: BTreeMap::new(),
             decree_floor: *decree_floor,
         };
         self.elapsed = 0;
@@ -934,7 +863,7 @@ impl MatchmakerReconfigurer {
     pub fn resend(&mut self) {
         let me = self.node;
         let queued = self.pending.len();
-        let mut queue = self.paged_requests();
+        let mut queue = self.freeze_and_bootstrap_requests();
         match &mut self.phase {
             ReconfigurerPhase::Idle
             | ReconfigurerPhase::Stopping { .. }
@@ -1006,53 +935,32 @@ impl MatchmakerReconfigurer {
         self.assert_requests_since(queued);
     }
 
-    /// The most journals one bootstrap page carries (#439): the driver's
-    /// page, no wider than the smallest page a frozen member cut its report
-    /// at.
-    fn bootstrap_page(cut: Option<usize>, limits: Limits) -> usize {
-        let page = cut.map_or(limits.registry_page, |cut| cut.min(limits.registry_page));
-        assert!(page > 0, "a bootstrap page carries a journal");
-        assert!(
-            page <= limits.registry_page,
-            "a bootstrap page is no wider than the driver's"
-        );
-        page
-    }
-
-    /// The paged phases' re-sends (#439): each member not counted yet is
-    /// asked for the page after the last one it answered.
-    fn paged_requests(&self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
+    /// The re-sends of the freeze and the bootstrap: each member not
+    /// counted yet is asked again.
+    fn freeze_and_bootstrap_requests(&self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
         let me = self.node;
-        let page = Self::bootstrap_page(self.cut, self.limits);
         let mut queue = Vec::new();
         match &self.phase {
-            ReconfigurerPhase::Stopping {
-                old, acks, partial, ..
-            } => {
+            ReconfigurerPhase::Stopping { old, acks, .. } => {
                 for m in old.members().iter().filter(|m| !acks.contains_key(m)) {
                     queue.push((
                         *m,
                         ReconfigureRequest::Stop {
                             from: me,
                             generation: old.generation,
-                            after: partial.get(m).map(|(_, cursor)| *cursor),
                         },
                     ));
                 }
             }
             ReconfigurerPhase::Bootstrapping {
-                bootstrap,
-                acks,
-                held,
-                ..
+                bootstrap, acks, ..
             } => {
                 for m in bootstrap.set.members().iter().filter(|m| !acks.contains(m)) {
-                    let after = held.get(m).copied().flatten();
                     queue.push((
                         *m,
                         ReconfigureRequest::Bootstrap {
                             from: me,
-                            bootstrap: bootstrap.page(after, page),
+                            bootstrap: bootstrap.clone(),
                         },
                     ));
                 }
@@ -1061,7 +969,7 @@ impl MatchmakerReconfigurer {
             | ReconfigurerPhase::Deciding { .. }
             | ReconfigurerPhase::Publishing { .. } => {}
         }
-        // Only a member that has not answered whole is asked again.
+        // Only a member that has not answered is asked again.
         assert!(
             queue.iter().all(|(m, _)| match &self.phase {
                 ReconfigurerPhase::Stopping { acks, .. } => !acks.contains_key(m),
@@ -1150,12 +1058,11 @@ impl MatchmakerReconfigurer {
         }
     }
 
-    /// A frozen page of a member of the generation being replaced.
+    /// The frozen report of a member of the generation being replaced.
     fn fold_stopping(&mut self, from: MatchmakerId, reply: ReconfigureReply) -> ReconfigurerStep {
         let ReconfigurerPhase::Stopping {
             old,
             acks,
-            partial,
             decree_floor,
             ..
         } = &mut self.phase
@@ -1164,9 +1071,7 @@ impl MatchmakerReconfigurer {
         };
         let ReconfigureReply::Stopped {
             generation,
-            after,
-            next,
-            registries,
+            registry,
             successor,
             decree_promised,
             ..
@@ -1190,48 +1095,13 @@ impl MatchmakerReconfigurer {
             // for the rest of a run.
             return ReconfigurerStep::Ignored;
         }
-        // A page counts only where it continues the member's report
-        // (#439): a stale or duplicated page moves nothing. Wire
-        // hygiene: at most a ceiling of journals, all above the
-        // cursor, and a cut page continues after its last journal.
-        let cursor = partial.get(&from).map(|(_, cursor)| *cursor);
-        let well_formed = registries.len() <= REGISTRY_PAGE
-            && registries
-                .keys()
-                .all(|journal| after.is_none_or(|after| *journal > after))
-            && next.is_none_or(|next| registries.keys().next_back() == Some(&next));
-        if after != cursor || !well_formed {
+        // Wire hygiene: a report with a registration below its own
+        // watermark moves nothing.
+        if !registry.holds_nothing_below() {
             return ReconfigurerStep::Ignored;
         }
-        let width = registries.len();
-        let mut report = partial.remove(&from).map_or_default(|(report, _)| report);
-        report.extend(registries);
         *decree_floor = (*decree_floor).max(decree_promised);
-        if let Some(next) = next {
-            // A cut page is full: the member's page is its width.
-            assert!(width > 0, "a cut frozen page carries a journal");
-            self.cut = Some(self.cut.map_or(width, |cut| cut.min(width)));
-            // The report continues: ask its next page now.
-            partial.insert(from, (report, next));
-            self.pending.push((
-                from,
-                ReconfigureRequest::Stop {
-                    from: self.node,
-                    generation,
-                    after: Some(next),
-                },
-            ));
-            return ReconfigurerStep::Stopped {
-                remaining: old.quorum_size().saturating_sub(acks.len()),
-            };
-        }
-        if after.is_some() {
-            probe!(
-                reachable,
-                "handover: a reconfigurer reads a frozen registry over several pages"
-            );
-        }
-        acks.insert(from, report);
+        acks.insert(from, registry);
         // The freeze does **not** close here. A quorum is what the
         // reconstruction *needs*, never what it should settle for:
         // closing on the ack that completed it made every `finish`
@@ -1255,7 +1125,7 @@ impl MatchmakerReconfigurer {
         }
     }
 
-    /// A member of the proposed set holds the reconstruction, or a page of it.
+    /// A member of the proposed set holds the reconstruction.
     fn fold_bootstrapping(
         &mut self,
         from: MatchmakerId,
@@ -1265,51 +1135,17 @@ impl MatchmakerReconfigurer {
             old,
             bootstrap,
             acks,
-            held,
             decree_floor,
         } = &mut self.phase
         else {
             unreachable!("fold_bootstrapping runs in the Bootstrapping phase");
         };
-        let ReconfigureReply::Bootstrapped {
-            set,
-            held: holds,
-            complete,
-            ..
-        } = reply
-        else {
+        let ReconfigureReply::Bootstrapped { set, .. } = reply else {
             return ReconfigurerStep::Ignored;
         };
         if set != bootstrap.set || !set.contains(from) || acks.contains(&from) {
             return ReconfigurerStep::Ignored;
         }
-        if !complete {
-            // The member holds the pages up to `holds` (#439): send
-            // the next one now. An answer that moved nothing is no
-            // progress; the driver's re-send cadence asks again.
-            if held.get(&from).copied().flatten() == holds && held.contains_key(&from) {
-                return ReconfigurerStep::Ignored;
-            }
-            held.insert(from, holds);
-            if holds.is_some() {
-                probe!(
-                    reachable,
-                    "handover: a reconfigurer sends a bootstrap over several pages"
-                );
-            }
-            let page = Self::bootstrap_page(self.cut, self.limits);
-            self.pending.push((
-                from,
-                ReconfigureRequest::Bootstrap {
-                    from: self.node,
-                    bootstrap: bootstrap.page(holds, page),
-                },
-            ));
-            return ReconfigurerStep::Bootstrapped {
-                remaining: bootstrap.set.members().len() - acks.len(),
-            };
-        }
-        held.remove(&from);
         acks.insert(from);
         assert!(
             acks.len() <= bootstrap.set.members().len(),

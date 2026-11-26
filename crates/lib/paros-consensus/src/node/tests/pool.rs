@@ -155,13 +155,7 @@ fn a_prior_belief_naming_an_unknown_node_abandons_the_campaign() {
         &mut mms,
         vec![(
             MatchmakerId(0),
-            MatchRequest::new(
-                J,
-                NodeId(0),
-                ballot(1, 0),
-                stranger,
-                MatchmakerGeneration(0),
-            ),
+            MatchRequest::new(NodeId(0), ballot(1, 0), stranger, MatchmakerGeneration(0)),
         )],
     );
     let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);

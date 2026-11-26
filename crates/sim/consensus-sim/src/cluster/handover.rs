@@ -22,7 +22,7 @@ impl Cluster {
     /// A fresh reconfigurer for node `id`, from its decree round on disk.
     pub(super) fn reconfigurer(&self, id: NodeId) -> MatchmakerReconfigurer {
         let round = self.decree_rounds[Self::index(id.0)];
-        MatchmakerReconfigurer::new(id, round, self.flavor.limits)
+        MatchmakerReconfigurer::new(id, round)
     }
 
     /// A node starts a handover from the set it believes to a target drawn
@@ -205,14 +205,10 @@ impl Cluster {
     }
 }
 
-/// The [`Mutant::ShrinkBootstrap`] bug: a bootstrap page loses the lowest
-/// record of the walk's journal on the wire.
+/// The [`Mutant::ShrinkBootstrap`] bug: a bootstrap loses its lowest
+/// record on the wire.
 fn shrink_bootstrap(request: &mut ReconfigureRequest) {
-    if let ReconfigureRequest::Bootstrap { bootstrap, .. } = request
-        && let Some(registry) = bootstrap
-            .registries
-            .get_mut(&paros_consensus::journal::JournalIdentifier::UNSET.journal)
-    {
-        registry.history.pop_first();
+    if let ReconfigureRequest::Bootstrap { bootstrap, .. } = request {
+        bootstrap.registry.history.pop_first();
     }
 }

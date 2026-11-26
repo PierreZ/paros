@@ -171,8 +171,10 @@ the round on disk (Pierre, 2026-11-19, #1229 (a stale `Stopped` reply reuses a d
 A `Stopped` reply carries no incarnation, so a reply sent to an earlier incarnation can reach a
 later one, and the floor of the stop quorum alone does not keep the round above the rounds of
 the earlier incarnation (`specs/tla/experiments/stale-stopped/`). The decree still opens above
-that floor, which skips rounds that the matchmakers would refuse. A handover is paged (#439): a `Stop` and its answers carry one page
-at a time. With one set per journal (2026-11-19) a set holds the state of one journal.
+that floor, which skips rounds that the matchmakers would refuse. With one set per journal
+(2026-11-19), a set holds the state of one journal, and one `Matchmaker` serves one journal
+(2026-11-26, #1430 (tenant catalog in the cell)): a `Stopped` answer carries the whole registry of
+its member, and a `Bootstrap` carries the whole rebuilt registry. The handover pages no journal.
 
 **GC.** A configuration is forgotten once it is sealed and its successor is in force: no future
 leader can need its Phase-1 quorum. The compaction floor and the GC watermark never wait on each

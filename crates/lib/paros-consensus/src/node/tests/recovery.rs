@@ -598,7 +598,6 @@ fn deployed_candidate() -> ColocatedNode {
     let mut history = BTreeMap::new();
     history.insert(ballot(1, 9), Registration::belief(cfg(&[0, 1, 2])));
     let step = n.on_match_reply(MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(0),
         ballot: n.ballot(),

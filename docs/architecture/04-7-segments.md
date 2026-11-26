@@ -25,7 +25,7 @@ oracle and a mutant on the trim jump.
 **What is built (step 4).** The chain at the matchmakers (R5): `journal/chain.rs` has the record
 of a segment (`SegmentRecord`: a start, an opening with the replicas that the `Roll` named, an
 end) and its merge, field by field, where two values of one field are a detected safety violation.
-`JournalScalars::segments` holds the chain of each journal. A node publishes the end of a segment
+`JournalScalars::segments` holds the chain of the journal (a matchmaker serves one journal, §3.4). A node publishes the end of a segment
 after its own fold applied the `Roll` (`SegmentPublish`, `node/chain.rs`): the walk, a refold
 past a healed hole, a trim-point jump and the boot each publish the `Roll`s they fold, so an end
 reaches the matchmakers even when every node that walked it restarted. It publishes to every matchmaker
@@ -193,10 +193,37 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   clamp walks down from the floor `up_to + 1` to a fixed point of the same walk
   (`Replica::compaction_floor`), and `Replica::truncate` asserts that its floor is one: a floor
   between a retry and the record that it reads would fold the retry `Refused` on a refold (the
-  class of #204). **Open** (step 6 code, with the `Hold` drop): `held-floor/` checks the fixed
-  point only on the drop of a `Hold`; its plain `Compact`, inherited from `truncation/`, has no
-  retry in any check. The PR of the `Hold` drop adds a check with a `Truncate` and a retry, where
-  `Compact` lands on `KeepFrom`, and a control without it.
+  class of #204). The plain `Compact` of a `Truncate` lands on the same fixed point:
+  `compact_kept` in `specs/tla/held-floor-hold/` passes with `c1`, `c2`, a retry of `c2` and a
+  `Truncate` that releases both writes. The target is slot 4, and a `Compact` that stops below it
+  at slot 2 would cut the retry from its record; the floor lands on slot 1 or 3 instead
+  (`reach_compact_kept`). Its control `compact_any`, the `Compact` of `truncation/`, which lands at
+  any point up to its target, breaks `RetryKept`. `compact_target` passes on a target that is
+  not closed itself (a retry of `c1` and a `Truncate` that releases `c1`).
+  The tally of the step 6 code: a sealed `ReplicaNode` whose floor is the start of its segment
+  answers each beat with `Message::SegmentHeld`; the leader counts a report only from a
+  replica that its fold names for that segment, with the end its fold gives
+  (`collector::HeldTally`, wired in `node/held.rs`); `AcceptorConfig::is_held_by` is the one
+  comparison with `F`; the end is in the chain once the node's own publish completed
+  (`Publisher::is_published`). `ColocatedNode::held_segments` lists the segments marked `Held`.
+  Not built yet: the `Hold` that a leader proposes for them, and its drop. The tally never forgets a sender that reported, and keeps a report
+  from the seal, before the chain publishes the end. Its safety rests on a fault model that the
+  tally cannot see and the deployment must keep: at most `F` replicas are down at one time, where
+  a replica is down from the loss of a segment that it held whole until it copies the segment
+  again. This is the reading of this step, not a decision of Pierre; the model with losses over
+  the whole run (`rlost < F`) stays beside it. Under that model a sender that lost its disk after
+  it reported still counts, and the floor is safe: `held_ever` in `specs/tla/held-floor-retry/`
+  passes with three replicas, `F = 1`, a tally that counts every reporter, and losses bounded at
+  one time. Its control `held_ever_down` (`F + 1` replicas down at one time) loses a record, and
+  `reach_held_stale` reaches a mark of `Held` while fewer than `F + 1` replicas hold the segment,
+  on the report of a replica that lost its disk since. **Open** (step 6): `F` is the `f` of the
+  configuration that the node believes in force when it judges, not of the configurations
+  that chose the slots of the segment; for a grid, `tolerated_failures` is the availability `f`
+  (the minimum over the two phases). The `Hold` step decides which configuration counts.
+  **Open** (step 6):
+  a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
+  holds every slot that a decided `Truncate` did not release, but the rule that counts it needs
+  a model with replicas that compact (`held-floor/` has none).
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
@@ -223,7 +250,7 @@ ballot, and with R4d its route is a fold of the chosen prefix that it learns
 | # | Rule | What no paper has | Check |
 |---|---|---|---|
 | 1 | R2, the `Roll` | A command that ends a range of learners. Its nearest source is Paxos Made Simple §3 (a reconfiguration is a command of the state machine). Stoppable Paxos also decides the end in the log, but it stops the instance; the `Roll` stops nothing | `specs/tla/segment-roll/` (`safety_small`, `safety`, `safety_bare`; the control `act_vote`; the `reach_*` checks show that the cases are reached); `specs/tla/multi-paxos-roll/` (the `Roll` as a command of the Multi-Paxos model: `roll` with `Inv`, the control `act_vote`) |
-| 2 | R7, the floor at `Held` | Scenario 3 of Matchmaker Paxos §3.5 and §4.5 (the chosen prefix on `f + 1` replicas), used for the compaction floor. `node/gc.rs` declines Scenario 3 today. The GC watermark rule does not change | `specs/tla/held-floor/` (extends `truncation/`: the controls `held_f`, `Held` at `F` replicas loses a record, and `held_log`, a floor past an end that the chain does not publish, and `floor_any`, a floor past a segment that is not held; the passes `floor_prefix`, and `held` and `held_loss` in `specs/tla/held-floor-pass/`; the jump of a laggard below the floor; the decided `Hold` of D9: the pass `hold_decided` in `specs/tla/held-floor-hold/`, where every node gives one answer to a retry and a duplicate always has its record, the control `hold_tally`, a floor from each node's tally, which gives two answers, the control `hold_any`, a `Hold` of a segment that is not held, which loses a record, the reach checks `reach_hold_judge` and `reach_hold_drop`; the retries in the log: the passes `hold_retry`, `hold_keep` and `hold_inner` in `specs/tla/held-floor-retry/`, where every floor stays closed (`RetryKept`), the control `hold_end`, a drop to the end over a retry that reads below it, and the control `hold_jump`, a jump to a point that no node held (the rule: a `TrimmedTo` carries the floor of its sender)) and `specs/tla/held-floor-reconfig/` (extends `truncation-reconfig/`: a reconfiguration onto an empty member after the acceptors dropped a held segment) |
+| 2 | R7, the floor at `Held` | Scenario 3 of Matchmaker Paxos §3.5 and §4.5 (the chosen prefix on `f + 1` replicas), used for the compaction floor. `node/gc.rs` declines Scenario 3 today. The GC watermark rule does not change | `specs/tla/held-floor/` (extends `truncation/`: the controls `held_f`, `Held` at `F` replicas loses a record, and `held_log`, a floor past an end that the chain does not publish, and `floor_any`, a floor past a segment that is not held; the passes `floor_prefix`, and `held` and `held_loss` in `specs/tla/held-floor-pass/`; a tally that never forgets a report, under at most `F` replicas down at one time: the pass `held_ever`, the control `held_ever_down` and the reach check `reach_held_stale`, in `specs/tla/held-floor-retry/`; the jump of a laggard below the floor; the decided `Hold` of D9: the pass `hold_decided` in `specs/tla/held-floor-hold/`, where every node gives one answer to a retry and a duplicate always has its record, the control `hold_tally`, a floor from each node's tally, which gives two answers, the control `hold_any`, a `Hold` of a segment that is not held, which loses a record, the reach checks `reach_hold_judge` and `reach_hold_drop`; the `Compact` of a `Truncate` over a retry: the passes `compact_kept` and `compact_target` in `specs/tla/held-floor-hold/`, where every `Compact` lands on the fixed point of the retries, and the control `compact_any`, a `Compact` that lands at any point up to its target; the retries in the log: the passes `hold_retry`, `hold_keep` and `hold_inner` in `specs/tla/held-floor-retry/`, where every floor stays closed (`RetryKept`), the control `hold_end`, a drop to the end over a retry that reads below it, and the control `hold_jump`, a jump to a point that no node held (the rule: a `TrimmedTo` carries the floor of its sender)) and `specs/tla/held-floor-reconfig/` (extends `truncation-reconfig/`: a reconfiguration onto an empty member after the acceptors dropped a held segment) |
 
 R4d is not a departure: it changes no vote and no choice. It says when a learner message leaves,
 from what the leader learned.

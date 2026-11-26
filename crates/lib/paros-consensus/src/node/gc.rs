@@ -212,7 +212,6 @@ impl ColocatedNode {
         let matchmakers = self.deployment_matchmakers();
         let request = GcRequest {
             from: self.config.id,
-            journal: self.config.journal.journal,
             generation: matchmakers.generation,
             watermark: self.ballot,
         };
@@ -729,10 +728,7 @@ impl ColocatedNode {
         let Some(believed) = self.matchmakers.as_ref() else {
             return GcStep::Ignored;
         };
-        if self.role != NodeRole::Leader
-            || !believed.contains(ack.matchmaker)
-            || ack.journal != self.config.journal.journal
-        {
+        if self.role != NodeRole::Leader || !believed.contains(ack.matchmaker) {
             return GcStep::Ignored;
         }
         // A stopped generation's refusal names its successor, as a

@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::contract::{Audience, MemStorage, Party};
-use paros_consensus::journal::{Command, Control, Entry, JournalId, LeaderUuid, Outcome, Seq};
+use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Outcome, Seq};
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MemRegistry, ReconfigureReply,
     ReconfigureRequest, SegmentAck, SegmentPublish,
@@ -489,11 +489,9 @@ impl Cluster {
             );
         }
         let registry = self.registries.get_mut(&to).expect("a matchmaker");
-        let outcome = registry.matchmaker.advance_gc_watermark(
-            request.journal,
-            request.generation,
-            request.watermark,
-        );
+        let outcome = registry
+            .matchmaker
+            .advance_gc_watermark(request.generation, request.watermark);
         self.pump_matchmaker(to);
         let ack = self.registries[&to].matchmaker.gc_ack(&request, outcome);
         self.wire.push_back(Packet::GcAck(request.from, ack));
@@ -653,11 +651,6 @@ impl Cluster {
     /// cluster started.
     pub fn received(&self, id: NodeId, kind: &'static str) -> usize {
         self.received.get(&(id, kind)).copied().unwrap_or_default()
-    }
-
-    /// The journal that the matchmakers file this cluster under.
-    pub fn journal_id(&mut self, id: NodeId) -> JournalId {
-        self.node(id).config().journal.journal
     }
 }
 

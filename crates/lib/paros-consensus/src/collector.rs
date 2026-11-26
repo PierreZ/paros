@@ -18,6 +18,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod held;
+
+pub use held::{HeldTally, SealedSegment};
+
 use crate::matchmaker::GcAck;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId, Slot};

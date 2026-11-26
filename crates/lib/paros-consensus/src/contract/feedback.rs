@@ -161,7 +161,7 @@ pub enum ProxyInsight {
     },
 }
 
-/// What a [`crate::matchmaker::Matchmaker`] reports about one journal.
+/// What a [`crate::matchmaker::Matchmaker`] reports about the journal it serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerFeedback {

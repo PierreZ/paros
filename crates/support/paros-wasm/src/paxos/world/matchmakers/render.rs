@@ -134,10 +134,7 @@ fn reconfigure_request_summary(request: &ReconfigureRequest) -> (&'static str, S
                 "Hold generation {} = {} pending, with {}",
                 bootstrap.set.generation.0,
                 show_set(bootstrap.set.members()),
-                many(
-                    bootstrap.registries.values().map(|r| r.history.len()).sum(),
-                    "registration"
-                )
+                many(bootstrap.registry.history.len(), "registration")
             ),
         ),
         ReconfigureRequest::DecreePrepare { ballot, .. } => (
@@ -170,17 +167,14 @@ fn reconfigure_reply_summary(answer: &ReconfigureReply) -> (&'static str, String
     match answer {
         ReconfigureReply::Stopped {
             generation,
-            registries,
+            registry,
             ..
         } => (
             "Stopped",
             format!(
                 "Frozen for generation {}, handing over {}",
                 generation.0,
-                many(
-                    registries.values().map(|r| r.history.len()).sum(),
-                    "registration"
-                )
+                many(registry.history.len(), "registration")
             ),
         ),
         ReconfigureReply::Bootstrapped { set, .. } => (

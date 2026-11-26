@@ -44,6 +44,13 @@ fn a_message_names_its_variant() {
         from_slot: Slot(4),
     };
     assert_eq!(pull.kind(), "CatchUpRequest");
+    let held = Message::SegmentHeld {
+        from: NodeId(7),
+        segment: crate::journal::SegmentId(1),
+        end: Slot(9),
+    };
+    assert_eq!(held.kind(), "SegmentHeld");
+    assert_eq!(held.sender(), super::Party::Node(NodeId(7)));
     let read = Message::PreRead {
         reply_to: NodeId(1),
         ctx: 7,

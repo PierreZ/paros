@@ -1,5 +1,4 @@
 use super::*;
-use crate::journal::JournalId;
 use crate::membership::QuorumSystem;
 
 fn config(members: &[u64]) -> AcceptorConfig {
@@ -26,7 +25,6 @@ fn ballot(round: u64) -> Ballot {
 fn ack(matchmaker: u64, generation: u64, watermark: Ballot) -> GcAck {
     GcAck {
         matchmaker: MatchmakerId(matchmaker),
-        journal: JournalId(0),
         generation: MatchmakerGeneration(generation),
         applied: true,
         watermark,

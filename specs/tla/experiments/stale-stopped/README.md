@@ -133,7 +133,7 @@ Neither fix exists in the code. This section is my reading of the code, not a ch
 ## Not in the model
 
 The ballots of other nodes (a ballot names its node, so they never equal a round of this node),
-the bootstrap pages, the matchmaker generation, a successor that a `Stopped` reports (it only
+the matchmaker generation, a successor that a `Stopped` reports (it only
 makes a reconfigurer stop, so leaving it out adds behaviors), a wiped matchmaker (#1229 notes
 that the handover decree is unsafe with one, `decree/` F2 of the gap review), and liveness. A
 matchmaker answers the `Stop` of one incarnation once (the network can still deliver that

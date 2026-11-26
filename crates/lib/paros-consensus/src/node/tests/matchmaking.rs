@@ -7,10 +7,6 @@
 use super::*;
 use crate::contract::limits::Limits;
 
-/// The journal every node of these tests serves (`Config::new` with
-/// `JournalIdentifier::UNSET`).
-const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
-
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
 fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
     let requests = drain_match_requests(n);
@@ -102,7 +98,6 @@ fn registered_page(
 /// `outcome`.
 fn registered_reply(mm: u64, ballot: Ballot, outcome: MatchOutcome) -> MatchReply {
     MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
         ballot,
@@ -212,7 +207,6 @@ fn a_refused_registration_never_becomes_a_leadership() {
     let mut mms = registries(3);
     // Another proposer is already registered above us everywhere.
     let above = MatchRequest::new(
-        J,
         NodeId(1),
         ballot(7, 1),
         cfg(&[0, 1, 2]),
@@ -1018,7 +1012,7 @@ fn an_ordinary_registration_never_raises_the_effective_configuration() {
             MatchOutcome::Probed { .. } => panic!("expected a registration, got a probe answer"),
         }
     }
-    assert_eq!(mms[0].effective(J), None);
+    assert_eq!(mms[0].effective(), None);
 }
 
 /// A full page of beliefs at rounds `1..=REGISTRY_PAGE`, all naming
@@ -1096,7 +1090,6 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     let page = crate::contract::limits::REGISTRY_PAGE;
     for round in 1..=page + 1 {
         mm.step(MatchRequest::new(
-            J,
             NodeId(1),
             ballot(round as u64, 1),
             cfg(&[0, 1, 2 + round as u64]),
@@ -1106,7 +1099,6 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     }
     let top = ballot(page as u64 + 5, 1);
     mm.step(MatchRequest::new(
-        J,
         NodeId(1),
         top,
         cfg(&[0, 1, 2]),
@@ -1130,7 +1122,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     // The cursor request re-answers idempotently, from where the first page
     // stopped, and registers nothing.
     mm.step(
-        MatchRequest::new(J, NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
+        MatchRequest::new(NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
             .from_page(next_from_ballot.expect("a cursor")),
     );
     let ready = mm.ready();
@@ -1182,21 +1174,18 @@ fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
     for round in 1..=40_u64 {
         let request = match round {
             20 => MatchRequest::reconfigure(
-                J,
                 NodeId(1),
                 ballot(round, 1),
                 cfg(&[0, 1, 2]),
                 MatchmakerGeneration(0),
             ),
             30 => MatchRequest::new(
-                J,
                 NodeId(2),
                 ballot(round, 2),
                 cfg(&[1, 2, 3]),
                 MatchmakerGeneration(0),
             ),
             _ => MatchRequest::new(
-                J,
                 NodeId(1),
                 ballot(round, 1),
                 cfg(&[0, 1, 2]),
@@ -1208,8 +1197,7 @@ fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
     }
     let top = ballot(50, 3);
     let ask = |from: Option<Ballot>| {
-        let request =
-            MatchRequest::new(J, NodeId(3), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0));
+        let request = MatchRequest::new(NodeId(3), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0));
         match from {
             Some(cursor) => request.from_page(cursor),
             None => request,
@@ -1285,7 +1273,6 @@ fn a_page_keeps_every_owner_of_a_repeated_belief() {
     let c = cfg(&[0, 1, 2, 3, 4]);
     for (round, owner) in [(2, 4), (5, 3), (6, 3)] {
         mm.step(MatchRequest::new(
-            J,
             NodeId(owner),
             ballot(round, owner),
             c.clone(),
@@ -1295,7 +1282,6 @@ fn a_page_keeps_every_owner_of_a_repeated_belief() {
     }
     let top = ballot(7, 2);
     mm.step(MatchRequest::new(
-        J,
         NodeId(2),
         top,
         c.clone(),
@@ -1398,7 +1384,6 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     let mut mms = registries(1);
     for round in 1..=page + 1 {
         mms[0].step(MatchRequest::new(
-            J,
             NodeId(1),
             ballot(round, 1),
             cfg(&[0, 1, 2 + round]),
@@ -1427,7 +1412,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     let raised = ballot(page + 1, 5);
     assert!(raised > cursor && raised < b);
     assert_eq!(
-        mms[0].advance_gc_watermark(J, MatchmakerGeneration(0), raised),
+        mms[0].advance_gc_watermark(MatchmakerGeneration(0), raised),
         crate::matchmaker::GcOutcome::Raised
     );
     mms[0].ready().advance();
@@ -1539,7 +1524,6 @@ fn probe_tag(n: &ColocatedNode) -> Ballot {
 /// A reply from matchmaker 0 to node `to` at `tag`, generation 0.
 fn reply_at(to: u64, tag: Ballot, outcome: MatchOutcome) -> MatchReply {
     MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(to),
         ballot: tag,
@@ -1742,8 +1726,6 @@ fn a_refused_membership_probe_closes_the_probe() {
 fn a_reply_the_campaign_did_not_ask_for_is_ignored() {
     let (mut n, b) = campaigning();
     let good = registered(0, b, &[], Ballot::zero());
-    let mut other_journal = good.clone();
-    other_journal.journal = crate::journal::JournalId(7);
     let mut other_generation = good.clone();
     other_generation.generation = MatchmakerGeneration(1);
     let probe_answer = registered_reply(
@@ -1754,7 +1736,7 @@ fn a_reply_the_campaign_did_not_ask_for_is_ignored() {
             named: None,
         },
     );
-    for reply in [other_journal, other_generation, probe_answer] {
+    for reply in [other_generation, probe_answer] {
         assert_eq!(
             n.on_match_reply(reply.clone()),
             MatchStep::Ignored,

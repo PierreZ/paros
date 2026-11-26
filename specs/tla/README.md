@@ -770,8 +770,8 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 (matchmaker safety and liveness).
 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
-configuration and the retirement records (`handover-scalars/`), the size of the successor set and
-more than one journal. `handover/` (#1097
+configuration and the retirement records (`handover-scalars/`) and the size of the successor set.
+A matchmaker serves one journal, like the model. `handover/` (#1097
 (rework 1.8)) extends this model with the target, the size and the register.
 
 ### `handover-scalars/`: the retirement records, the effective configuration and the chain of segments across a handover, for #1230 (rules no check tests)
@@ -866,8 +866,7 @@ The traces of the controls:
   configuration. This is the reason for the scalar (`JournalScalars::effective`).
 
 Not in the model: the registrations that block a retirement (`retire-fence/` checks that rule),
-Phase 1, the decree that chooses the successor, lost matchmaker state, more than one handover
-and more than one journal.
+Phase 1, the decree that chooses the successor, lost matchmaker state and more than one handover.
 
 ### `handover/`: a matchmaker set handover onto a named target, for #1097 (rework 1.8)
 
@@ -979,8 +978,8 @@ nothing in the handover sees a resize that the operator records after the target
 named. This is the rule (Pierre, 2026-11-20): a resize waits for the handover
 (`docs/architecture/04-roles.md`, rule 2).
 
-Not in the model: the decree (`decree/`), lost matchmaker state, more than one journal (a
-handover is paged, #439) and the registrations, which leave with rule 1. A client step that
+Not in the model: the decree (`decree/`), lost matchmaker state and the registrations, which
+leave with rule 1. A client step that
 reaches a minority, the clients of generation 1 and a second handover are in
 `handover-chain/`.
 
@@ -2849,6 +2848,9 @@ replica holds only chosen slots of its own segments).
 | `floor_any` | ci | violation of `FloorTruncatedOrHeld`: segment 2 is held and segment 1 is not; the floor rises to the end of segment 2 over slot 0 |
 | `held` (in `held-floor-pass/`) | ci | pass: every invariant, two ballots of one leader, `a2` catches up and jumps, `F = 0` and one replica (2.4 million states, 10 minutes with 4 workers) |
 | `held_loss` (in `held-floor-pass/`) | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
+| `held_ever` (in `held-floor-retry/`) | ci | pass: every invariant, with the tally of the code: a replica counts once it held the whole segment, before or after the publish, and is never forgotten (`Count = "ever"`); three replicas, `F = 1`, and at most `F` replicas down at one time (`Losses = "at_once"`: a replica is down from the loss of a segment it held until it holds it again) (22 thousand distinct states) |
+| `held_ever_down` (in `held-floor-retry/`) | ci | violation of `RecordKept`: `held_ever` with `F + 1` replicas down at one time (`Losses = "at_once_f1"`) |
+| `reach_held_stale` (in `held-floor-retry/`) | ci | violation of the action property `NoStaleMark`: the constants of `held_ever`; the leader marks the segment `Held` on the report of a replica that lost its disk since, while fewer than `F + 1` replicas hold it |
 | `floor_prefix` | ci | pass: every invariant, two `Roll`s, one ballot (0.21 million) |
 | `hold_decided` (in `held-floor-hold/`) | ci | pass: every invariant, with `OneAnswer` (every node gives one answer to a retry at one slot) and `DupHasRecord` (a "dup" answer has the record of the write); the decided `Hold` at slot 2, `a1` and `a2` judge (`HoldPlan`; 0.30 million states, 8 minutes with 4 workers) |
 | `hold_retry` (in `held-floor-retry/`) | ci | pass: `hold_decided` with four slots and a retry of `c1` at slot 2, between the end of segment 1 and the `Hold` at slot 3 (`RetryPlan`), and `RetryKept` (the floor of each acceptor is closed); no judge. The retry reads slot 0, so the drop keeps every slot and the floor stays at 0 (88 thousand states) |
@@ -2862,6 +2864,10 @@ replica holds only chosen slots of its own segments).
 | `hold_end` (in `held-floor-retry/`) | ci | violation of `RetryKept`: the drop at the `Hold` goes to the end of segment 1, over the retry at slot 2, which reads the record of slot 0 |
 | `reach_retry_keep` (in `held-floor-retry/`) | ci | violation of `NoRetryKeep`: a node folded the `Hold` with a retry in the window, and its floor stays below the end |
 | `reach_hold_laggard` | long | violation of `NoLaggardWin`: `reach_laggard_win` with the decided `Hold` (5.9 million states, 14 minutes with 4 workers) |
+| `compact_kept` (in `held-floor-hold/`) | ci | pass: `c1`, `c2`, a retry of `c2`, then a `Truncate` that releases both (`CompactPlan`, `Cut2`, no `Roll`); the target is slot 4, floor 2 would cut the retry from its record, and every `Compact` lands on a closed floor, slot 1 or 3 (`CompactTo = "kept"`, `Replica::compaction_floor`), so `RetryKept` holds (5,276 distinct states) |
+| `compact_target` (in `held-floor-hold/`) | ci | pass: `compact_kept` with a retry of `c1` and a `Truncate` that releases `c1` (`Cut1`): the target, slot 1, is not closed, so no `Compact` moves a floor (4,670 distinct states) |
+| `compact_any` (in `held-floor-hold/`) | ci | violation of `RetryKept`: `compact_kept` with the `Compact` of `truncation/`, which lands at any point up to its target (`CompactTo = "any"`) |
+| `reach_compact_kept` (in `held-floor-hold/`) | ci | violation of `NoCompactKept`: the constants of `compact_kept`; a `Compact` stopped below its target lands on slot 1, a fixed point under slot 2, which is not closed |
 | `hold_tally` (in `held-floor-hold/`) | ci | violation of `OneAnswer`: the floor from the tally of each node; `a1` answers "held" where `a2` answers "dup" |
 | `hold_any` (in `held-floor-hold/`) | ci | violation of `RecordKept`: a `Hold` of a segment that is not held drops a record that no replica holds |
 | `reach_hold_judge`, `reach_hold_drop` (in `held-floor-hold/`) | ci | violation: a node answers "held"; a node folds a `Hold` and drops the held segment |
@@ -2873,7 +2879,8 @@ replica holds only chosen slots of its own segments).
 
 `held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
 `held_loss`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of
-the decided `Hold` and of the retries, so that each of the four jobs stays inside its minutes.
+the decided `Hold` and of the retries (`held-floor-hold/` also the `Compact` of a `Truncate` over
+a retry, `held-floor-retry/` the tally that never forgets a report), so that each of the four jobs stays inside its minutes.
 The guard mutation of `HeldFloor.tla` runs the checks of the four folders.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the

@@ -9,7 +9,6 @@ use crate::types::Slot;
 fn publish(sealed: u64, start: u64, end: u64, generation: MatchmakerGeneration) -> SegmentPublish {
     SegmentPublish {
         from: NodeId(1),
-        journal: J,
         generation,
         sealed: SegmentId(sealed),
         start: Slot(start),
@@ -36,16 +35,16 @@ fn publish_at(
 #[test]
 fn a_publish_grows_the_chain_durably_and_once() {
     let mut mm = fresh(0);
-    assert!(mm.chain(J).is_none());
+    assert!(mm.chain().is_none());
     let (outcome, ack, writes) = publish_at(&mut mm, &publish(0, 0, 5, G0));
     assert_eq!(outcome, PublishOutcome::Merged);
     assert!(ack.applied);
     assert_eq!(ack.sealed, SegmentId(0));
     assert!(ack.newer.is_none());
     assert!(
-        matches!(writes.as_slice(), [MatchmakerWriteOp::SetScalars(s)] if s.journals[&J].segments.len() == 2)
+        matches!(writes.as_slice(), [MatchmakerWriteOp::SetScalars(s)] if s.journal.segments.len() == 2)
     );
-    let chain = mm.chain(J).expect("a chain").clone();
+    let chain = mm.chain().expect("a chain").clone();
     assert_eq!(chain[&SegmentId(0)].end, Some(Slot(5)));
     assert_eq!(chain[&SegmentId(1)].start, Slot(5));
     // The same publish again changes nothing and is acked again.
@@ -57,7 +56,7 @@ fn a_publish_grows_the_chain_durably_and_once() {
     let (outcome, _, _) = publish_at(&mut mm, &publish(1, 5, 9, G0));
     assert_eq!(outcome, PublishOutcome::Merged);
     let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm), Limits::DEFAULT);
-    let chain = rebooted.chain(J).expect("a chain");
+    let chain = rebooted.chain().expect("a chain");
     assert_eq!(chain.len(), 3);
     assert_eq!(chain[&SegmentId(1)].end, Some(Slot(9)));
     assert!(chain[&SegmentId(1)].opening.is_some());
@@ -78,18 +77,17 @@ fn a_frozen_member_refuses_a_publish_and_reports_its_chain() {
     mm.step_reconfigure(ReconfigureRequest::Stop {
         from: NodeId(5),
         generation: G0,
-        after: None,
     });
     let (_, replies) = drain_reconfigure(&mut mm);
-    let ReconfigureReply::Stopped { registries, .. } = &replies[0] else {
+    let ReconfigureReply::Stopped { registry, .. } = &replies[0] else {
         panic!("expected Stopped, got {:?}", replies[0]);
     };
-    assert_eq!(Some(&registries[&J].segments), mm.chain(J));
+    assert_eq!(Some(&registry.segments), mm.chain());
     let (outcome, ack, writes) = publish_at(&mut mm, &publish(1, 5, 9, G0));
     assert_eq!(outcome, PublishOutcome::Refused);
     assert!(!ack.applied);
     assert_eq!(writes, []);
-    assert!(!mm.chain(J).expect("a chain")[&SegmentId(1)].is_sealed());
+    assert!(!mm.chain().expect("a chain")[&SegmentId(1)].is_sealed());
     // A publish of another generation is refused too.
     let (outcome, _, _) = publish_at(&mut fresh(1), &publish(0, 0, 5, MatchmakerGeneration(3)));
     assert_eq!(outcome, PublishOutcome::Refused);
@@ -134,24 +132,19 @@ fn an_activation_merges_the_reconstructed_chain_into_its_own() {
         from: NodeId(9),
         bootstrap: PendingBootstrap {
             set: successor.clone(),
-            registries: BTreeMap::from([(
-                J,
-                JournalRegistry {
-                    gc_watermark: Ballot::zero(),
-                    history: BTreeMap::new(),
-                    effective: None,
-                    retired: BTreeMap::new(),
-                    segments: reconstructed,
-                },
-            )]),
-            complete: true,
-        }
-        .page(None, REGISTRY_PAGE),
+            registry: JournalRegistry {
+                gc_watermark: Ballot::zero(),
+                history: BTreeMap::new(),
+                effective: None,
+                retired: BTreeMap::new(),
+                segments: reconstructed,
+            },
+        },
     });
     mm.ready().advance();
     let _ = chosen(&mut mm, 9, &successor);
     assert_eq!(*mm.set(), successor);
-    let chain = mm.chain(J).expect("a chain");
+    let chain = mm.chain().expect("a chain");
     assert_eq!(
         chain.len(),
         3,
@@ -165,5 +158,5 @@ fn an_activation_merges_the_reconstructed_chain_into_its_own() {
     );
     assert!(chain[&SegmentId(1)].opening.is_some());
     let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm), Limits::DEFAULT);
-    assert_eq!(rebooted.chain(J), mm.chain(J));
+    assert_eq!(rebooted.chain(), mm.chain());
 }

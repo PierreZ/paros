@@ -9,12 +9,15 @@ use crate::matchmaker::{SegmentAck, SegmentPublish};
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::node::RollResult;
 
-fn drain_publishes(n: &mut ColocatedNode) -> Vec<(MatchmakerId, SegmentPublish)> {
+pub(super) fn drain_publishes(n: &mut ColocatedNode) -> Vec<(MatchmakerId, SegmentPublish)> {
     drain_with(n, |ready| ready.segment_publishes().to_vec()).1
 }
 
 /// Deliver `requests` to the matchmakers, and return their acks.
-fn publish(mms: &mut [Matchmaker], requests: &[(MatchmakerId, SegmentPublish)]) -> Vec<SegmentAck> {
+pub(super) fn publish(
+    mms: &mut [Matchmaker],
+    requests: &[(MatchmakerId, SegmentPublish)],
+) -> Vec<SegmentAck> {
     let mut acks = Vec::new();
     for (id, request) in requests {
         let mm = &mut mms[usize::try_from(id.0).expect("matchmaker index")];
@@ -27,7 +30,7 @@ fn publish(mms: &mut [Matchmaker], requests: &[(MatchmakerId, SegmentPublish)]) 
 
 /// A cluster of three matchmakers whose leader rolled to `replicas` and
 /// whose `Roll` every node walked. Returns the slot of the `Roll`.
-fn rolled(replicas: Option<ReplicaSet>) -> ([ColocatedNode; 5], Vec<Matchmaker>, Slot) {
+pub(super) fn rolled(replicas: Option<ReplicaSet>) -> ([ColocatedNode; 5], Vec<Matchmaker>, Slot) {
     let (mut nodes, mms) = deployed_cluster_with(3);
     let RollResult::Accepted { slot, .. } = nodes[0].roll(replicas) else {
         panic!("the leader admits a roll");
@@ -108,32 +111,23 @@ fn every_node_publishes_the_end_its_walk_applied_until_a_majority_holds_it() {
         "a completed publish is not sent again"
     );
     for mm in &mms[..2] {
-        let chain = mm
-            .chain(nodes[1].config().journal.journal)
-            .expect("a chain");
+        let chain = mm.chain().expect("a chain");
         assert_eq!(chain[&SegmentId(0)].end, Some(end));
         assert_eq!(chain[&SegmentId(1)].start, end);
         assert!(!chain[&SegmentId(1)].is_sealed());
     }
-    assert!(mms[2].chain(nodes[1].config().journal.journal).is_none());
+    assert!(mms[2].chain().is_none());
     // Another node's publish of the same end is the same records.
     nodes[2].resend_segment_publishes();
     let requests = drain_publishes(&mut nodes[2]);
-    let before = mms[0].chain(nodes[2].config().journal.journal).cloned();
+    let before = mms[0].chain().cloned();
     let acks = publish(&mut mms, &requests);
     assert!(acks.iter().all(|a| a.applied));
-    assert_eq!(
-        mms[0].chain(nodes[2].config().journal.journal).cloned(),
-        before
-    );
-    assert_eq!(
-        mms[2].chain(nodes[2].config().journal.journal).cloned(),
-        before
-    );
+    assert_eq!(mms[0].chain().cloned(), before);
+    assert_eq!(mms[2].chain().cloned(), before);
 }
 
-/// A node ignores an ack of another journal, of another generation, of a
-/// segment it does not publish, from a matchmaker outside its set, and a
+/// A node ignores an ack of another generation, of a segment it does not publish, from a matchmaker outside its set, and a
 /// refusal that names no later set.
 #[test]
 fn a_node_ignores_an_ack_that_is_not_for_its_publish() {
@@ -142,10 +136,6 @@ fn a_node_ignores_an_ack_that_is_not_for_its_publish() {
     let requests = drain_publishes(&mut nodes[1]);
     let ack = publish(&mut mms, &requests[..1]).remove(0);
     let others = [
-        SegmentAck {
-            journal: crate::journal::JournalId(ack.journal.0 + 1),
-            ..ack.clone()
-        },
         SegmentAck {
             generation: MatchmakerGeneration(7),
             ..ack.clone()
@@ -286,34 +276,5 @@ fn a_refold_past_a_healed_hole_publishes_each_end_with_its_own_start() {
             (SegmentId(1), Slot(first.0 + 1), Slot(second.0 + 1)),
             (SegmentId(2), Slot(second.0 + 1), Slot(third.0 + 1)),
         ]
-    );
-}
-
-/// A refusal of another journal teaches nothing, even when it names a later
-/// matchmaker set: the publish stays asked of the set it was.
-#[test]
-fn a_refusal_of_another_journal_teaches_no_set() {
-    let (mut nodes, mut mms, _) = rolled(None);
-    nodes[1].resend_segment_publishes();
-    let requests = drain_publishes(&mut nodes[1]);
-    let ack = publish(&mut mms, &requests[..1]).remove(0);
-    let generation = requests[0].1.generation;
-    let successor = MatchmakerSet::new(
-        MatchmakerGeneration(generation.0 + 1),
-        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
-    );
-    let foreign = SegmentAck {
-        journal: crate::journal::JournalId(ack.journal.0 + 1),
-        applied: false,
-        newer: Some(successor),
-        ..ack
-    };
-    assert_eq!(nodes[1].on_segment_ack(&foreign), None);
-    nodes[1].resend_segment_publishes();
-    let again = drain_publishes(&mut nodes[1]);
-    assert!(!again.is_empty(), "the publish is still pending");
-    assert!(
-        again.iter().all(|(_, r)| r.generation == generation),
-        "the publish is still asked of the same set"
     );
 }

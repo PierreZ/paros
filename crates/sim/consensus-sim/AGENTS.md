@@ -141,8 +141,7 @@ Test only: `publish = false`, never a dependency of another crate.
   - `cluster/handover.rs` → `Action::Handover`: each node's driver holds a
     `MatchmakerReconfigurer`, starts a handover to a target from the matchmaker pool, finishes
     a frozen generation it meets, adopts a chosen set, and republishes it to a matchmaker left
-    behind. A sibling journal on the bootstrap set makes a freeze and a bootstrap carry two
-    journals, so a small page pages them.
+    behind.
   - `cluster.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
     `ColocatedNode::move_round`), and a client retry inside `Action::Propose` (the same records
     at a position written before).
@@ -255,7 +254,7 @@ Test only: `publish = false`, never a dependency of another crate.
   retirement with no evidence); the `reconfiguring` flavor against `node/MatchmakerGridTrace`
   (control: an early GC request on a grid, `Mutant::EarlyGc` on `reconfigured-compartments`);
   the batcher walk against `batcher/` (control: a lane sent out of push order); the `handover`
-  flavor against `generations/` (control: a bootstrap page that lost a registration,
+  flavor against `generations/` (control: a bootstrap that lost a registration,
   `Mutant::ShrinkBootstrap`). The tests
   `tlc_refuses_the_edited_*` apply every edit of `trace::mutate` to the recorded walks of each
   trace spec (the first seed and the seeds that meet a new rule; 40 seeds of the decree and

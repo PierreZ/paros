@@ -139,8 +139,8 @@ the copies written one after the other; no snapshots and no compaction. A commit
 two, for every store (decision 15, question 4, section 2.9). paros stores the state itself: a slot is a position, its
 ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
 metainfo; a matchmaker registration is a position of its own, its generation in its identity.
-A matchmaker's scalars grow with its tenant's journals and its pending bootstraps, and the
-metainfo is one block, so they are entries too (#439 (operator calls name their journal)): the
+A matchmaker's scalars grow with the chain of its journal and its pending bootstraps, and the
+metainfo is one block, so they are entries too: the
 scalars are encoded and cut into chunks of `JournalStoreConfig::meta_chunk` bytes, and the
 metainfo is a header that holds the format marker, an epoch and the chunks' positions. Each
 write of the scalars takes a fresh epoch and fresh positions in the commit of its header, and

@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 
-use paros_consensus::journal::JournalId;
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState, MemRegistry,
     PublishOutcome, ReconfigureReply, ReconfigureRequest, Registration, SegmentAck, SegmentPublish,
@@ -51,8 +50,7 @@ impl RegistryDisk {
     /// The registry records, in ballot order.
     #[must_use]
     pub fn registrations(&self) -> &BTreeMap<Ballot, Registration> {
-        static EMPTY: BTreeMap<Ballot, Registration> = BTreeMap::new();
-        self.store.registrations().get(&JOURNAL).unwrap_or(&EMPTY)
+        self.store.registrations()
     }
 
     /// How many durable writes this disk has taken. One acknowledged batch
@@ -69,10 +67,6 @@ impl RegistryDisk {
         self.synced = self.writes;
     }
 }
-
-/// The game's one journal: every level runs a single journal under the unset
-/// identifier, so a set's registry holds this journal alone.
-pub(crate) const JOURNAL: JournalId = JournalId::UNSET;
 
 /// One matchmaker process: the role, the configuration it boots with, and the
 /// disk it reboots from. `None` for the role is a crashed matchmaker — its
@@ -100,10 +94,7 @@ impl MatchmakerProcess {
     ) -> Self {
         let config = MatchmakerConfig { id, bootstrap };
         let disk = RegistryDisk {
-            store: MemRegistry::new(
-                MatchmakerHardState::default(),
-                BTreeMap::from([(JOURNAL, registrations)]),
-            ),
+            store: MemRegistry::new(MatchmakerHardState::default(), registrations),
             writes: 0,
             synced: 0,
         };
@@ -195,11 +186,10 @@ impl MatchmakerProcess {
     /// dropped instead leaves the raise pending, and the next batch applies it
     /// to the disk a second time.
     pub(super) fn deliver_gc(&mut self, request: GcRequest) -> Option<GcAck> {
-        let outcome = self.role.as_mut()?.advance_gc_watermark(
-            request.journal,
-            request.generation,
-            request.watermark,
-        );
+        let outcome = self
+            .role
+            .as_mut()?
+            .advance_gc_watermark(request.generation, request.watermark);
         self.persist();
         let role = self.role.as_mut()?;
         let ack = role.gc_ack(&request, outcome);
