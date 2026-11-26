@@ -272,6 +272,51 @@ fn deliver_all(nodes: &mut [ColocatedNode], queue: Vec<(NodeId, Message)>) {
 /// *target* `CheckQuorum` set a short window explicitly instead.
 const NO_CHECK_QUORUM: u64 = 1_000_000;
 
+/// Close one `CheckQuorum` window of the leader `nodes[idx]` with the acks
+/// of every node: the proof that `ColocatedNode::reconfigure` asks of a
+/// leadership whose election ran no Phase 1 (`ReconfigureRefusal::Unproven`).
+/// Leaves the leader with [`NO_CHECK_QUORUM`].
+fn close_window(nodes: &mut [ColocatedNode], idx: usize) {
+    let held = nodes[idx].counters().quorum_windows_held;
+    nodes[idx].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[idx].tick();
+    let q = drain(&mut nodes[idx]);
+    deliver_all(nodes, q);
+    nodes[idx].set_election_timeout(1);
+    nodes[idx].tick();
+    nodes[idx].set_election_timeout(NO_CHECK_QUORUM);
+    let q = drain(&mut nodes[idx]);
+    deliver_all(nodes, q);
+    assert!(nodes[idx].is_leader(), "a held window keeps the leadership");
+    assert!(
+        nodes[idx].counters().quorum_windows_held > held,
+        "a window closed"
+    );
+}
+
+/// [`close_window`] for a lone leader `n`, with the acks of `from` stepped
+/// by hand at its ballot.
+fn close_window_alone(n: &mut ColocatedNode, from: &[u64]) {
+    let held = n.counters().quorum_windows_held;
+    n.set_election_timeout(NO_CHECK_QUORUM);
+    n.tick();
+    drain(n);
+    for &id in from {
+        n.step(Message::HeartbeatAck {
+            from: NodeId(id),
+            ballot: n.ballot(),
+            chosen: None,
+        });
+        drain(n);
+    }
+    n.set_election_timeout(1);
+    n.tick();
+    n.set_election_timeout(NO_CHECK_QUORUM);
+    drain(n);
+    assert!(n.is_leader(), "a held window keeps the leadership");
+    assert!(n.counters().quorum_windows_held > held, "a window closed");
+}
+
 /// Drive `nodes[idx]` to leadership in a healthy cluster, then beat once so the
 /// followers learn who the leader is (a follower only adopts a leader on
 /// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an

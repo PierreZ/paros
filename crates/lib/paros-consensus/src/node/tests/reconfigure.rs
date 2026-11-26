@@ -147,6 +147,54 @@ fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() 
     );
 }
 
+/// While the GC of a reconfiguration is not effective, the old
+/// configuration is still in force: the next campaign needs a Phase-1 seal
+/// of it too. Only a member of the current configuration credits a window,
+/// so the members that both configurations share prove the old one. A
+/// window that only a new member acked proves nothing for it, and a second
+/// reconfiguration is refused until a shared member acks.
+#[test]
+fn a_second_reconfiguration_needs_a_proof_for_the_configuration_still_in_force() {
+    let (mut nodes, mut mms) = deployed_cluster();
+    close_window(&mut nodes, 0);
+    let new = cfg(&[0, 1, 3]);
+    assert!(matches!(
+        nodes[0].reconfigure(&new),
+        ReconfigureResult::Started(_)
+    ));
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(&mut mms, requests) {
+        nodes[0].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    assert_eq!(*nodes[0].acceptors(), new);
+    let (prior, _) = nodes[0].configs_in_force().expect("a leader");
+    assert_eq!(prior, vec![&cfg(&[0, 1, 2])], "the GC is not effective");
+    // A window that the new member 3 acks: {0, 3} is a majority of
+    // {0, 1, 3}, not of {0, 1, 2}.
+    close_window_alone(&mut nodes[0], &[3]);
+    let next = cfg(&[0, 1, 4]);
+    assert_eq!(
+        nodes[0].reconfigure(&next),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unproven)
+    );
+    // The shared member 1 acks the open window: {0, 1} is a majority of
+    // both.
+    nodes[0].step(Message::HeartbeatAck {
+        from: NodeId(1),
+        ballot: nodes[0].ballot(),
+        chosen: None,
+    });
+    drain(&mut nodes[0]);
+    let result = nodes[0].reconfigure(&next);
+    assert!(
+        matches!(result, ReconfigureResult::Started(_)),
+        "{result:?}"
+    );
+}
+
 /// A reconfiguration that matchmakers refuse as naming a retired node
 /// (#1002 (retire fence gaps)) skips a minority of such refusals, because a
 /// quorum that took the node's rejoin is enough (#1037 (rejoin)). Once the
@@ -464,4 +512,66 @@ fn a_leader_whose_promise_was_passed_refuses_a_reconfiguration() {
         nodes[0].reconfigure(&cfg(&[0, 1])),
         ReconfigureResult::Refused(ReconfigureRefusal::Unsettled)
     );
+}
+
+/// On a full grid of 2 x 2 a `CheckQuorum` window holds on one column, a
+/// Phase-2 quorum, but a Phase-1 quorum needs a member of each column, and
+/// a seal of the grid, which the next campaign asks of it, also needs a
+/// member of each row. A leader whose proof is one column, or one row,
+/// refuses a reconfiguration.
+#[test]
+fn a_window_held_by_one_column_or_one_row_of_a_grid_proves_nothing() {
+    let pool: Vec<NodeId> = (0..5).map(NodeId).collect();
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2, 3]);
+    storage.config.nodes.clone_from(&pool);
+    storage.config.matchmakers = vec![MatchmakerId(0)];
+    storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 2);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    let mut mms = registries(1);
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    for reply in matchmake(&mut mms, requests) {
+        n.on_match_reply(reply);
+    }
+    drain(&mut n);
+    assert!(n.is_leader(), "the first campaign bypasses Phase 1");
+    let grid = |members: &[u64]| {
+        AcceptorConfig::new(
+            members.iter().copied().map(NodeId).collect(),
+            crate::membership::QuorumSystem::grid(2, 2),
+        )
+    };
+    let next = grid(&[0, 1, 2, 4]);
+    assert_eq!(
+        n.reconfigure(&next),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unproven),
+        "a bypassed election proves nothing"
+    );
+    // Column 0 is {0, 2}: its acks hold the window, a Phase-2 quorum.
+    close_window_alone(&mut n, &[2]);
+    assert_eq!(
+        n.reconfigure(&next),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unproven),
+        "one column is no Phase-1 quorum of the grid"
+    );
+    // Row 0 is {0, 1}: one member of each column, a Phase-1 quorum, but no
+    // seal. The next campaign asks the grid of today for a seal, since it is
+    // a prior configuration there, so these acks of the open window prove
+    // nothing.
+    n.step(Message::HeartbeatAck {
+        from: NodeId(1),
+        ballot: n.ballot(),
+        chosen: None,
+    });
+    drain(&mut n);
+    assert_eq!(
+        n.reconfigure(&next),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unproven),
+        "one row is no seal of a full-column grid"
+    );
+    close_window_alone(&mut n, &[1, 2]);
+    assert!(matches!(
+        n.reconfigure(&next),
+        ReconfigureResult::Started(_)
+    ));
 }

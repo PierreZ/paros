@@ -31,7 +31,7 @@ fn shrunk_cluster_after(proposed: u64) -> ([ColocatedNode; 3], Vec<Matchmaker>) 
         let q = drain(&mut nodes[0]);
         deliver_all(&mut nodes, q);
     }
-    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    close_window(&mut nodes, 0);
     assert!(matches!(
         nodes[0].reconfigure(&cfg(&[0, 1])),
         ReconfigureResult::Started(_)

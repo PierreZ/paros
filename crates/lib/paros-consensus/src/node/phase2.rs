@@ -420,7 +420,10 @@ impl ColocatedNode {
             slot,
             command,
         });
-        self.proposer.close_round(slot);
+        assert!(
+            !self.proposer.rounds().contains_key(&slot),
+            "a decided round is closed by the learn"
+        );
     }
 
     /// Take the delegated round at `slot` back and run it colocated: seed
@@ -483,15 +486,12 @@ impl ColocatedNode {
             slot >= self.acceptor.first_slot(),
             "a moved round lies above the compaction floor"
         );
-        // A round can outlive its slot's choice for a moment (a `Commit` or
-        // a catch-up taught the replica first): nothing is left to move.
-        if self.replica.is_chosen(slot) {
-            probe!(
-                reachable,
-                "phase2: a stuck round whose slot is chosen elsewhere is not moved"
-            );
-            return false;
-        }
+        // A learn closes the round of the slot it teaches
+        // (`close_chosen_round`), so an open round's slot is never chosen.
+        assert!(
+            !self.replica.is_chosen(slot),
+            "an open round's slot is not chosen yet"
+        );
         let recorded = self.record_own_round(slot, ballot, &command);
         let own_vote = self.own_vote(recorded, Some(column));
         if !self

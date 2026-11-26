@@ -42,6 +42,15 @@ pub struct Authority<Id> {
     /// the windows in a row that closed with a quorum but without its ack.
     /// A member that acked the last window has no entry.
     missed: BTreeMap<Id, u64>,
+    /// The acceptors that last proved they answer this leadership: the
+    /// promises of the election it won ([`Authority::prove`]), then the acks
+    /// of each window that closed ([`Authority::close`]). `None` until one
+    /// of the two, as on a leadership that a handoff installed.
+    #[expect(
+        clippy::box_collection,
+        reason = "one pointer in place of a set keeps a ColocatedNode small enough that a test holds five on the stack"
+    )]
+    proven: Option<Box<BTreeSet<Id>>>,
 }
 
 impl<Id> Default for Authority<Id> {
@@ -51,6 +60,7 @@ impl<Id> Default for Authority<Id> {
             quorum_acked_by: BTreeSet::new(),
             quorum_elapsed: 0,
             missed: BTreeMap::new(),
+            proven: None,
         }
     }
 }
@@ -193,6 +203,11 @@ impl<Id: Copy + Ord> Authority<Id> {
                 *count = count.saturating_add(1);
             }
         }
+        self.proven = Some(Box::new(self.quorum_acked_by.clone()));
+        assert!(
+            self.proven.as_deref() == Some(&self.quorum_acked_by),
+            "a closed window proves the acceptors that acked it"
+        );
         // Each entry is a member that missed at least the window that closed.
         for (id, count) in &self.missed {
             assert!(*count > 0, "a missed count is at least one window");
@@ -202,6 +217,43 @@ impl<Id: Copy + Ord> Authority<Id> {
                 "a member that acked the closed window has no missed count"
             );
         }
+    }
+
+    /// Record that the acceptors of `by` answered this leadership: the
+    /// promises of the election it won. The next window that closes
+    /// replaces them.
+    ///
+    /// # Panics
+    ///
+    /// If `by` is empty: a won election rests on promises.
+    pub fn prove(&mut self, by: BTreeSet<Id>) {
+        assert!(!by.is_empty(), "a won election rests on promises");
+        self.proven = Some(Box::new(by));
+        assert!(self.proven.is_some(), "a proof is kept");
+    }
+
+    /// The acceptors whose ack at this leadership's ballot arrived inside
+    /// the open `CheckQuorum` window (the leader's own vote among them when
+    /// it is an acceptor).
+    #[must_use]
+    pub fn acked(&self) -> &BTreeSet<Id> {
+        &self.quorum_acked_by
+    }
+
+    /// The acceptors that last proved they answer this leadership: the
+    /// promises of its election, or the acks of its last window that
+    /// closed. `None` while neither exists. A caller asks a quorum
+    /// question of it through `membership/`.
+    ///
+    /// # Panics
+    ///
+    /// If a kept proof is empty: a proof rests on answers.
+    #[must_use]
+    pub fn proven(&self) -> Option<&BTreeSet<Id>> {
+        if let Some(proven) = &self.proven {
+            assert!(!proven.is_empty(), "a proof rests on answers");
+        }
+        self.proven.as_deref()
     }
 
     /// The windows in a row that each member of the configuration missed,
@@ -315,6 +367,24 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         }
         self.authority.open(fence, own_vote);
         assert!(self.fence() == fence, "an opened authority holds its fence");
+    }
+
+    /// Record the promises of the won election ([`Authority::prove`]).
+    ///
+    /// # Panics
+    ///
+    /// If a campaign is still open, or `by` is empty.
+    pub fn prove_authority(&mut self, by: BTreeSet<Id>) {
+        assert!(
+            self.election.is_none(),
+            "only a won election proves an authority"
+        );
+        let count = by.len();
+        self.authority.prove(by);
+        assert!(
+            self.authority.proven().map(BTreeSet::len) == Some(count),
+            "the authority keeps the promises that won"
+        );
     }
 
     /// Start the `CheckQuorum` window again ([`Authority::renew`]).

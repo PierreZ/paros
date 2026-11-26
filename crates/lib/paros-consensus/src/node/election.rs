@@ -705,6 +705,10 @@ impl ColocatedNode {
         let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
         self.proposer
             .open_authority(fence, self.is_acceptor().then_some(me));
+        // The promises that won are the first proof that a Phase-1 quorum of
+        // each configuration of the campaign answers this leadership
+        // (`ReconfigureRefusal::Unproven`).
+        self.proposer.prove_authority(outcome.promised_by.clone());
         // The won ballot is a read basis (#260): its configuration, with the
         // fence standing for everything the earlier configurations chose.
         // Both are opened before any recovery runs, as the handoff install

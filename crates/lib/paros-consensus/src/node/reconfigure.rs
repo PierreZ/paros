@@ -88,6 +88,22 @@ pub enum ReconfigureRefusal {
     Unsettled,
     /// The round space is exhausted: no strictly higher ballot exists.
     RoundExhausted,
+    /// Nothing proves that each configuration in force still answers this
+    /// leader with a Phase-1 seal ([`AcceptorConfig::has_phase1_seal`]): a
+    /// Phase-1 quorum and, on a full-column grid, a member of each row.
+    /// The proof is the acks of the open `CheckQuorum` window, the acks of
+    /// the last window that closed, or the promises of the election that
+    /// the leadership won. A reconfiguration leaves the ballot for a
+    /// campaign in which each configuration in force is a prior
+    /// configuration other than its own, so that campaign asks each for a
+    /// seal (`Election::covered`); without the proof the journal could
+    /// stall. The guard sees only the configurations in force: a campaign
+    /// also needs the configurations that other campaigns registered above
+    /// the watermark, which only matchmaking reads. Only a member of the
+    /// current configuration credits a window, so while the GC of a prior
+    /// configuration is not effective, the members that both share are its
+    /// proof. The caller retries after the next window closes.
+    Unproven,
 }
 
 /// The outcome of [`ColocatedNode::reconfigure`].
@@ -107,6 +123,44 @@ pub enum ReconfigureResult {
 }
 
 impl ColocatedNode {
+    /// Whether a recent proof of this leadership is a Phase-1 seal of each
+    /// configuration in force (`ReconfigureRefusal::Unproven`): the acks of its open `CheckQuorum` window, or
+    /// the last proof before it (the acks of the last window that closed, or
+    /// the promises of the election it won).
+    fn leadership_proven(&self) -> bool {
+        let Some((prior, current)) = self.configs_in_force() else {
+            return false;
+        };
+        assert!(
+            !current.members().is_empty(),
+            "a configuration in force has members"
+        );
+        assert!(
+            prior.iter().all(|c| !c.members().is_empty()),
+            "a prior configuration in force has members"
+        );
+        let authority = self.proposer.authority();
+        let proves = |by: &std::collections::BTreeSet<NodeId>| {
+            current.has_phase1_seal(by) && prior.iter().all(|c| c.has_phase1_seal(by))
+        };
+        let open = proves(authority.acked());
+        let last = authority.proven().is_some_and(proves);
+        // A seal only adds to a Phase-1 quorum.
+        if open {
+            assert!(
+                current.has_phase1_quorum(authority.acked()),
+                "a seal of the open window holds a Phase-1 quorum"
+            );
+        }
+        if let Some(by) = authority.proven().filter(|_| last) {
+            assert!(
+                current.has_phase1_quorum(by),
+                "a seal of the last proof holds a Phase-1 quorum"
+            );
+        }
+        open || last
+    }
+
     /// Leader entry point for an **online reconfiguration**: move this
     /// leadership to a fresh ballot registered with `config` as its acceptor
     /// set. See the module doc for the flow, the accepted stall window, and
@@ -137,6 +191,9 @@ impl ColocatedNode {
         // moving. The same narrowness as `can_relinquish`.
         if !self.leadership_settled() || self.ballot < self.acceptor.promised() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unsettled);
+        }
+        if !self.leadership_proven() {
+            return ReconfigureResult::Refused(ReconfigureRefusal::Unproven);
         }
         if self.next_campaign_round().is_none() {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);

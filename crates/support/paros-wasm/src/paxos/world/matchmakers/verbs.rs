@@ -604,6 +604,12 @@ fn refusal_text(id: NodeId, refusal: ReconfigureRefusal, members: &str) -> Strin
         ReconfigureRefusal::RoundExhausted => {
             "there is no higher ballot left to move to.".to_string()
         }
+        ReconfigureRefusal::Unproven => format!(
+            "{} has no proof yet that a Phase-1 quorum still answers it. A new set is a new \
+             ballot, and its Phase 1 needs that quorum: without it the journal could stall. \
+             Ask again once a heartbeat window closes with a quorum of acks.",
+            who(id)
+        ),
     }
 }
 
