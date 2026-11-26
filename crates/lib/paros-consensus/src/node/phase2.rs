@@ -420,7 +420,10 @@ impl ColocatedNode {
             slot,
             command,
         });
-        self.proposer.close_round(slot);
+        assert!(
+            !self.proposer.rounds().contains_key(&slot),
+            "a decided round is closed by the learn"
+        );
     }
 
     /// Take the delegated round at `slot` back and run it colocated: seed

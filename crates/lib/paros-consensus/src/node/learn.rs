@@ -55,12 +55,9 @@ impl ColocatedNode {
         // before the walk that `mark_chosen` drives, which routes.
         self.note_choosing_ballot(slot, ballot);
         self.mark_chosen(slot, command, ballot);
-        // `mark_chosen` asserted that a decision at the open round's ballot
-        // carries the round's command, so closing it here never drops a
-        // round whose command differs from what was chosen.
-        if self.proposer.is_round_open_at(slot, ballot) {
-            self.proposer.close_round(slot);
-        }
+        // `mark_chosen` closed the round open at the slot, if any
+        // (`close_chosen_round`); below the floor, the compaction that
+        // raised it dropped the round.
         // A learned slot is chosen here, or compacted away as chosen.
         if slot >= self.acceptor.first_slot() {
             assert!(
@@ -108,7 +105,7 @@ impl ColocatedNode {
             // slot already present in `chosen`, and a catch-up replay of that
             // slot is then the only message this node keeps receiving. Skipping
             // the walk here wedged that node in a forever catch-up loop.
-            self.close_chosen_round(slot, ballot);
+            self.close_chosen_round(slot, ballot, command);
             self.advance_chosen_index();
             return;
         }
@@ -147,7 +144,7 @@ impl ColocatedNode {
             "a learned slot leaves a live campaign's promise at its ballot"
         );
         self.replica.learn(&self.acceptor, slot, command);
-        self.close_chosen_round(slot, ballot);
+        self.close_chosen_round(slot, ballot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
         self.proposer.probe_resolved_elsewhere(slot);
@@ -178,8 +175,10 @@ impl ColocatedNode {
     /// command again (P2c) and has nothing left to decide. Left open, such a
     /// round waits for the votes of its column, and a member that compacted
     /// the slot away never answers: the leadership would hold the round for
-    /// good.
-    fn close_chosen_round(&mut self, slot: Slot, choosing: Ballot) {
+    /// good. A round below the choosing ballot belongs to a leadership that
+    /// a higher ballot passed: its command may differ, and it can never be
+    /// chosen at this slot, so closing it loses nothing.
+    fn close_chosen_round(&mut self, slot: Slot, choosing: Ballot, command: &Command) {
         assert!(
             self.replica.is_chosen(slot),
             "only a slot known chosen closes its round"
@@ -189,6 +188,13 @@ impl ColocatedNode {
                 sometimes,
                 round.ballot() != choosing,
                 "learn: a slot chosen at another ballot closes the open round"
+            );
+            // P2c: every ballot above the choosing one proposes the chosen
+            // command at this slot. Two commands here are a detected safety
+            // violation.
+            assert!(
+                round.ballot() < choosing || round.command() == command,
+                "a round at or above the choosing ballot carries the chosen command"
             );
             self.proposer.close_round(slot);
         }
