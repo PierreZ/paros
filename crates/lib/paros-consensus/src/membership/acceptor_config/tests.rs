@@ -415,3 +415,27 @@ fn the_fallible_constructors_match_the_panicking_ones() {
         Ok(base.with_counts(MAX_ROLE_COUNT, MAX_ROLE_COUNT))
     );
 }
+
+#[test]
+fn a_segment_is_held_by_more_than_f_copies() {
+    let three = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
+    assert!(!three.is_held_by(0));
+    assert!(
+        !three.is_held_by(1),
+        "F = 1: one lost disk loses the only copy"
+    );
+    assert!(three.is_held_by(2));
+    let five = AcceptorConfig::new(nodes(1..=5), QuorumSystem::Majority);
+    assert!(!five.is_held_by(2));
+    assert!(five.is_held_by(3));
+    // Four acceptors survive one loss, as three do.
+    let four = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Majority);
+    assert!(!four.is_held_by(1));
+    assert!(four.is_held_by(2));
+    let one = AcceptorConfig::new(nodes([1]), QuorumSystem::Majority);
+    assert!(!one.is_held_by(0));
+    assert!(one.is_held_by(1), "F = 0: one copy is enough");
+    // The 2 × 3 grid loses a column's Phase-1 count after one failure.
+    assert!(!grid().is_held_by(1));
+    assert!(grid().is_held_by(2));
+}

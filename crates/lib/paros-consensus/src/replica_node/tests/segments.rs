@@ -462,3 +462,114 @@ fn a_rotted_slot_past_the_end_is_not_pulled_after_a_reboot() {
     );
     ready.advance();
 }
+
+/// A multi-writer replica of a matchmaker deployment, where segments
+/// exist (R10).
+fn matchmaker_multi() -> Config {
+    Config {
+        nodes: vec![NodeId(0), NodeId(1), NodeId(2)],
+        matchmakers: vec![crate::membership::MatchmakerId(0)],
+        ..multi()
+    }
+}
+
+fn beat() -> Message {
+    Message::Heartbeat {
+        from: NodeId(0),
+        ballot: Ballot {
+            round: 1,
+            node: NodeId(0),
+        },
+        commit: Some(Slot(1)),
+        config: None,
+        fence: None,
+        gc_floor: None,
+    }
+}
+
+/// The `SegmentHeld` reports a beat gets back.
+fn reports(replica: &mut ReplicaNode, disk: &mut MemStorage) -> Vec<Message> {
+    replica.step(beat());
+    let ready = replica.ready();
+    disk.apply(ready.writes());
+    let sent = ready
+        .messages()
+        .iter()
+        .filter(|(to, m)| {
+            matches!(m, Message::SegmentHeld { .. })
+                && *to == crate::contract::message::Audience::Node(NodeId(0))
+        })
+        .map(|(_, m)| m.clone())
+        .collect();
+    ready.advance();
+    sent
+}
+
+/// A sealed replica that holds its whole segment answers each beat that it
+/// holds it, up to its end; an open replica does not.
+#[test]
+fn a_sealed_replica_reports_its_whole_segment_on_each_beat() {
+    let mut disk = MemStorage::new(matchmaker_multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    let _ = drain(&mut replica, &mut disk);
+    assert_eq!(reports(&mut replica, &mut disk), [], "an open replica");
+    replica.step(commit(1, roll(1)));
+    let _ = drain(&mut replica, &mut disk);
+    let held = Message::SegmentHeld {
+        from: NodeId(10),
+        segment: SegmentId(0),
+        end: Slot(2),
+    };
+    assert_eq!(reports(&mut replica, &mut disk), std::slice::from_ref(&held));
+    assert_eq!(reports(&mut replica, &mut disk), [held], "on each beat");
+}
+
+/// A replica that joined segment 1 at its start reports segment 1 once
+/// sealed.
+#[test]
+fn a_joined_replica_reports_the_segment_it_joined() {
+    let mut disk = MemStorage::new(matchmaker_multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert_eq!(replica.join_segment(Slot(2), boundary()), Ok(()));
+    let _ = drain(&mut replica, &mut disk);
+    replica.step(commit(2, write(8)));
+    replica.step(commit(3, roll(2)));
+    let _ = drain(&mut replica, &mut disk);
+    assert_eq!(
+        reports(&mut replica, &mut disk),
+        [Message::SegmentHeld {
+            from: NodeId(10),
+            segment: SegmentId(1),
+            end: Slot(4),
+        }]
+    );
+}
+
+/// A sealed replica that compacted inside its segment no longer holds all
+/// of it, and a plain replica has no segments to report.
+#[test]
+fn a_compacted_or_plain_replica_reports_nothing() {
+    let mut disk = MemStorage::new(matchmaker_multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    replica.step(commit(1, write(8)));
+    replica.step(commit(
+        2,
+        Command::Control(Control::Truncate {
+            leader: LeaderUuid(0),
+            up_to: Seq(2),
+        }),
+    ));
+    replica.step(commit(3, roll(1)));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(replica.replica().is_sealed());
+    assert!(replica.first_slot() > Slot(0));
+    assert_eq!(reports(&mut replica, &mut disk), []);
+    let mut disk = MemStorage::new(multi());
+    let mut plain = ReplicaNode::new(&disk, Limits::DEFAULT);
+    plain.step(commit(0, roll(1)));
+    let _ = drain(&mut plain, &mut disk);
+    assert!(plain.replica().is_sealed());
+    assert_eq!(reports(&mut plain, &mut disk), []);
+}

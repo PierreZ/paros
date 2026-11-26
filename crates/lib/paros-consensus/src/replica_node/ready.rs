@@ -52,11 +52,12 @@ impl ReplicaReady<'_> {
         for (audience, message) in messages {
             assert!(
                 match message {
-                    Message::CatchUpRequest { from, .. } => *from == me,
+                    Message::CatchUpRequest { from, .. } | Message::SegmentHeld { from, .. } =>
+                        *from == me,
                     Message::PreRead { reply_to, .. } => *reply_to == me,
                     _ => false,
                 },
-                "a replica sends only its own catch-up requests and pre-reads"
+                "a replica sends only its own catch-up requests, pre-reads and held reports"
             );
             assert!(
                 matches!(audience, Audience::Node(to) if *to != me && self.node.in_pool(*to)),

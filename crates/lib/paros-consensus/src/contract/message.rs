@@ -615,6 +615,26 @@ pub enum Message {
         #[cfg_attr(feature = "serde", serde(default))]
         chosen: Option<Slot>,
     },
+
+    // ---- Segments (§4.7 of `docs/architecture/`) ----
+    /// Replica of a segment → the leader whose beat it answers: "I hold
+    /// every slot of `segment`, from its start to `end`, durably" (R7).
+    /// Sent only by a sealed `ReplicaNode` whose floor is the start of the
+    /// segment it keeps, so it holds the whole segment; the driver persists
+    /// the records before it sends the message, as for every reply. The
+    /// leader counts the senders that the fold names as replicas of the
+    /// segment ([`crate::collector::HeldTally`]); more than `F` of them,
+    /// with the end in the chain, make the segment `Held`. A matchmaker
+    /// deployment only: a plain node ignores it.
+    SegmentHeld {
+        /// The replica that holds the segment.
+        from: NodeId,
+        /// The segment it holds.
+        segment: SegmentId,
+        /// The first slot past the end of the segment (the slot after its
+        /// `Roll`), as the fold of the replica gives it.
+        end: Slot,
+    },
 }
 
 impl Message {
@@ -648,7 +668,8 @@ impl Message {
             | Message::Relinquish { from, .. }
             | Message::Heartbeat { from, .. }
             | Message::PreReadAck { from, .. }
-            | Message::HeartbeatAck { from, .. } => Party::Node(*from),
+            | Message::HeartbeatAck { from, .. }
+            | Message::SegmentHeld { from, .. } => Party::Node(*from),
         }
     }
 
@@ -679,6 +700,7 @@ impl Message {
             Message::PreRead { .. } => "PreRead",
             Message::PreReadAck { .. } => "PreReadAck",
             Message::HeartbeatAck { .. } => "HeartbeatAck",
+            Message::SegmentHeld { .. } => "SegmentHeld",
         }
     }
 }

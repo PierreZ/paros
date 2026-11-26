@@ -350,6 +350,7 @@ mod decide_apply;
 mod election;
 mod gc;
 mod handoff;
+mod held;
 mod invariants;
 mod matchmaking;
 mod membership_probe;

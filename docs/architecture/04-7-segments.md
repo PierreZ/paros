@@ -197,6 +197,16 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   point only on the drop of a `Hold`; its plain `Compact`, inherited from `truncation/`, has no
   retry in any check. The PR of the `Hold` drop adds a check with a `Truncate` and a retry, where
   `Compact` lands on `KeepFrom`, and a control without it.
+  The tally of the step 6 code: a sealed `ReplicaNode` whose floor is the start of its segment
+  answers each beat with `Message::SegmentHeld`; the leader counts a report only from a
+  replica that its fold names for that segment, with the end its fold gives
+  (`collector::HeldTally`, wired in `node/held.rs`); `AcceptorConfig::is_held_by` is the one
+  comparison with `F`; the end is in the chain once the node's own publish completed
+  (`Publisher::is_published`). `ColocatedNode::held_segments` lists the segments marked `Held`.
+  Not built yet: the `Hold` that a leader proposes for them, and its drop. **Open** (step 6):
+  a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
+  holds every slot that a decided `Truncate` did not release, but the rule that counts it needs
+  a model with replicas that compact (`held-floor/` has none).
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment

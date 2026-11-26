@@ -653,6 +653,31 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
         self.quorum_system
     }
 
+    /// Whether `copies` replicas that each hold a whole segment keep it
+    /// as safe as this configuration's acceptors kept its slots (R7 and D8
+    /// of `docs/architecture/04-7-segments.md` §4.7): more than `F`
+    /// copies, where `F` is the `f` of this configuration
+    /// ([`QuorumSystem::tolerated_failures`]). So `F` lost replica disks
+    /// leave one copy, and `F` copies are not enough (the control
+    /// `held_f` of `specs/tla/held-floor/`). The one place the count of a
+    /// held segment is compared.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn is_held_by(&self, copies: usize) -> bool {
+        let f = self.quorum_system.tolerated_failures(self.members.len());
+        assert!(
+            f < self.members.len().max(1),
+            "a configuration never survives losing every acceptor"
+        );
+        let held = copies > f;
+        assert!(!held || copies >= 1, "a held segment has a copy");
+        held
+    }
+
     /// Whether `node` is a member of this configuration.
     ///
     /// # Panics
