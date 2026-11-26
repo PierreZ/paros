@@ -5,7 +5,7 @@ EXTENDS HeldFloor, TLC
 \* The acceptor and replica names, the truncation value and the `Roll`
 \* value, the `Hold` value, the retry value and the commands: model values that the
 \* configurations set.
-CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1, w1, c1, c2
+CONSTANTS a1, a2, a3, r1, r2, r3, roll2, roll3, hold1, w1, c1, c2
 
 \* A majority of the acceptors, the same for every slot.
 Majorities == {Q \in SUBSET Acceptors : 2 * Cardinality(Q) > Cardinality(Acceptors)}
@@ -38,6 +38,9 @@ Roll23 == [v \in {roll2, roll3} |-> IF v = roll2 THEN 2 ELSE 3]
 \* of segment 1 (D4: a `Roll` with no replicas keeps the same machines).
 Reps12 == [k \in Segs |-> IF k = 1 THEN {r1, r2} ELSE {}]
 Reps1 == [k \in Segs |-> IF k < Cardinality(Segs) THEN {r1} ELSE {}]
+\* Segment 1 has three replicas, so a replica that reported it and lost its
+\* disk can still be counted while two others hold it.
+Reps123 == [k \in Segs |-> IF k = 1 THEN {r1, r2, r3} ELSE {}]
 
 \* The script of a check, a state constraint on the values that a leader
 \* allocates. The gap fill of a new leader still writes a `Noop` at a hole.
@@ -69,4 +72,6 @@ CmdPlan3 == Planned([s \in Slots |-> IF s = 1 THEN Rolls ELSE Commands])
 
 \* The two replicas of segment 1 are alike.
 ReplicaPerms == Permutations({r1, r2})
+\* The three replicas of segment 1 are alike.
+ReplicaPerms3 == Permutations({r1, r2, r3})
 =============================================================================

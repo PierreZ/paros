@@ -74,7 +74,7 @@
 EXTENDS Truncation
 
 CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes,
-          HoldOf, HoldBy, HoldWhen, Judges, HoldDrop, RetryOf, JumpTo
+          HoldOf, HoldBy, HoldWhen, Judges, HoldDrop, RetryOf, JumpTo, Count, Losses
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
@@ -86,6 +86,7 @@ ASSUME HoldOf \in [HoldCmds -> Segs] /\ HoldBy \in {"decided", "tally"}
 ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 ASSUME HoldDrop \in {"keep", "end"} /\ RetryOf \in [Retries -> Commands]
 ASSUME JumpTo \in {"past", "any"}
+ASSUME Count \in {"now", "ever"} /\ Losses \in {"total", "at_once"}
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -94,6 +95,7 @@ VARIABLES rhold,  \* replica: the slots it holds
           answers \* the retries judged: a node, a fold point, a position
 
 VARIABLE past \* acceptor: every floor that it held (a history, for `JumpTo`)
+VARIABLE reported \* segment: every replica that held all of it (a history, for `Count`)
 
 seg == <<rhold, chain, held, rlost, answers>>
 hvars == <<vars, seg>>
@@ -107,6 +109,7 @@ HeldTypeOK ==
   /\ answers \subseteq [node : Acceptors, at : Slots, pos : 0..NS,
                         ans : {"truncated", "held", "dup"}, has : BOOLEAN]
   /\ past \in [Acceptors -> SUBSET (0..NS)]
+  /\ reported \in [Segs -> SUBSET Replicas]
 
 HeldInit ==
   /\ Init
@@ -116,6 +119,7 @@ HeldInit ==
   /\ rlost = 0
   /\ answers = {}
   /\ past = [a \in Acceptors |-> {0}]
+  /\ reported = [k \in Segs |-> {}]
 
 -----------------------------------------------------------------------------
 (* The segments of the chosen log *)
@@ -176,11 +180,21 @@ Publish(k) ==
 \* The replicas that `Held` needs.
 Need == IF HeldAt = "f_plus_one" THEN F + 1 ELSE F
 
+\* The replicas of segment k that hold every slot of it now.
+HoldsAll(k) == IF End(k) = 0 THEN {} ELSE {r \in RepOf[k] : SegSlots(k, End(k)) \subseteq rhold[r]}
+
+\* The replicas that the tally counts for segment k. With `Count = "now"`,
+\* those that hold all of it in this state. With `Count = "ever"`, each
+\* replica that held all of it once (`reported`): the tally of
+\* `collector/held.rs` never forgets a report, and a replica that lost its
+\* disk since still counts.
+Counted(k) == IF Count = "now" THEN HoldsAll(k) ELSE reported[k]
+
 \* The leader marks segment k `Held`: enough of its replicas hold every slot
 \* of it, up to its end.
 MarkHeld(k) ==
   /\ End(k) > 0
-  /\ Cardinality({r \in RepOf[k] : SegSlots(k, End(k)) \subseteq rhold[r]}) >= Need
+  /\ Cardinality(Counted(k)) >= Need
   /\ held' = held \cup {k}
   /\ UNCHANGED <<vars, rhold, chain, rlost, answers>>
 
@@ -254,10 +268,20 @@ HeldFloor(a, k) ==
      /\ learned' = [learned EXCEPT ![a] = DropLearned(a, f)]
      /\ UNCHANGED <<prom, phase, from, next, blocked, restarts, faults, msgs, seg>>
 
-\* Replica r loses its disk. At most `F` replicas do.
+\* The replicas that are down: each held all of a segment once and does not
+\* hold all of it now (it lost its disk, and has not copied the segment
+\* again).
+Down == {r \in Replicas : \E k \in Segs : r \in reported[k] /\ r \notin HoldsAll(k)}
+
+\* Replica r loses its disk. With `Losses = "total"`, at most `F` replicas
+\* do over the whole run. With `Losses = "at_once"`, any number do, but at
+\* most `F` replicas are down at one time: a replica that lost its disk
+\* copies its segments again from a peer before one more is lost.
 LoseReplica(r) ==
-  /\ rlost < F
-  /\ rlost' = rlost + 1
+  /\ IF Losses = "total"
+       THEN rlost < F /\ rlost' = rlost + 1
+       ELSE /\ Cardinality(Down \cup ({r} \cap UNION {reported[k] : k \in Segs})) <= F
+            /\ rlost' = rlost
   /\ rhold' = [rhold EXCEPT ![r] = {}]
   /\ UNCHANGED <<vars, chain, held, answers>>
 
@@ -329,8 +353,10 @@ HeldNext ==
 HeldStep ==
   /\ HeldNext
   /\ past' = IF Retries = {} THEN past ELSE [a \in Acceptors |-> past[a] \cup {floor'[a]}]
+  /\ reported' = IF Count = "now" /\ Losses = "total" THEN reported
+                  ELSE [k \in Segs |-> reported[k] \cup HoldsAll(k)']
 
-HeldSpec == HeldInit /\ [][HeldStep]_<<hvars, past>>
+HeldSpec == HeldInit /\ [][HeldStep]_<<hvars, past, reported>>
 
 \* The liveness of `Truncation.tla`: the fairness of the last leader, whose
 \* steps keep `seg`.
@@ -461,4 +487,9 @@ NoKeepMid == ~\E a \in Acceptors, k \in held : 0 < floor[a] /\ floor[a] < chain[
 NoJudgeHeld == ~\E x \in answers : x.ans = "held"
 \* A replica lost its disk after a segment was held.
 NoLossAfterHeld == ~(held # {} /\ rlost > 0)
+\* A segment is held while one of the replicas counted for it is down, and
+\* the acceptors dropped it.
+NoHeldDown == ~\E k \in held :
+                /\ Counted(k) \cap Down # {}
+                /\ chain[k] > 0 /\ \A a \in Acceptors : floor[a] >= chain[k]
 =============================================================================
