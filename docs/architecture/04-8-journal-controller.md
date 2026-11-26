@@ -36,21 +36,26 @@ party gives both orders.
 operator's half off:
 
 - `two_controllers` (pass): `Electable` holds. No retirement leaves a matchmaker quorum that
-  gives a configuration without a Phase-1 quorum. The matchmakers decide it alone: a retire check
-  needs every matchmaker of the set (`allTomb`), a matchmaker that holds a registration above the
-  floor that names `n` refuses the check, and a matchmaker that agreed refuses each later
-  registration that names `n` (`MatchRefusal::Retired`).
-- `two_controllers_reach` (violation, a control): TLC reaches a trace where a matchmaker refuses
-  the reconfiguration of the second controller because it names the retired node. So the checks
-  above judge the interleaving.
+  gives a configuration without a Phase-1 quorum. The matchmakers decide it alone: a matchmaker
+  that holds a registration above the floor that names `n` refuses the retire check, and a
+  matchmaker that agreed refuses each later registration that names `n`
+  (`MatchRefusal::Retired`).
+- `two_controllers_reach` (violation, a control): TLC reaches a trace where `n` retires while a
+  reconfiguration above every matchmaker's floor names it (`NoRetiredNamed`).
+  `two_controllers_operator`, the same check with the operator's half on, passes. So the trace
+  needs the second controller, and `two_controllers` judges the interleaving.
 - `two_controllers_live` (pass): `NoRetiredLivelock` holds. A leader whose reconfiguration the
   matchmakers refuse as `Retired` abandons it (#1065 (retired reconfiguration)) and is free to
   campaign again.
 - `two_controllers_livelock` (violation, a control): without the abandon, the refused
-  reconfiguration blocks for good.
+  reconfiguration blocks for good. This control does not need the second controller: a
+  matchmaker refuses as soon as it holds the tomb of a node, before the node retires.
 
-`ask_all_tomb_no_operator` already had the safety half with two ballots and no abandon; the new
-checks add a third ballot, the abandon and the liveness.
+These checks use two matchmakers, three ballots and no restart. With two matchmakers a majority
+is every matchmaker, so they do not tell a retire check at every matchmaker (`allTomb`, what
+`node/gc.rs` does) from one at a quorum. `ask_all_tomb_no_operator` covers that, with three
+matchmakers, a restart and two ballots. No check has three ballots, three matchmakers and a
+restart together: a first run with three matchmakers and three ballots did not finish in the time of one session, and it was stopped.
 
 #### 4.8.2 Zones: a spare carries its failure domain
 
