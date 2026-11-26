@@ -161,6 +161,11 @@ fn dropped_controller_orders_are_caught_by_goal_2() {
 }
 
 #[test]
+fn dropped_retire_orders_are_caught_by_goal_2() {
+    caught(Flavor::healing(), Mutant::DropRetires, 5, HEALED);
+}
+
+#[test]
 fn a_controller_with_a_late_view_is_caught_by_no_false_silence() {
     caught(Flavor::healing(), Mutant::LateView, 60, NO_FALSE_SILENCE);
 }

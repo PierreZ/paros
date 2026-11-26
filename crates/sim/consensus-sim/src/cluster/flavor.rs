@@ -578,6 +578,11 @@ pub enum Mutant {
     /// [`HEALED`](crate::oracle::healed::HEALED) at the end of the settle
     /// rounds.
     DropOrders,
+    /// The driver drops every `Retire` order of the journal controllers:
+    /// the node that leaves the cell runs on past an effective floor.
+    /// Caught by [`HEALED`](crate::oracle::healed::HEALED) at the end of the
+    /// settle rounds.
+    DropRetires,
     /// The driver feeds the fresh controller the rounds of the stale one:
     /// its view lags. Once the faults stop it replaces a member that the
     /// leader missed while it was down, and that runs again. Caught by

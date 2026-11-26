@@ -76,6 +76,9 @@ pub mod reach {
     pub const CONTROL_STARTED: &str = "cluster: a leader started a controller's reconfiguration";
     /// A node retired on a controller's order.
     pub const CONTROL_RETIRED: &str = "cluster: a node retired on a controller's order";
+    /// A node retired at its driver once the matchmakers checked it, with no
+    /// further order of a controller.
+    pub const CONTROL_RETIRED_CHECKED: &str = "cluster: a checked node retired at its own driver";
     /// A party applied a valid `Roll`: the log entered a new segment.
     pub const ROLLED: &str = "cluster: a party applied a valid Roll";
     /// A leader admitted a `Roll` while an earlier one was still open: no

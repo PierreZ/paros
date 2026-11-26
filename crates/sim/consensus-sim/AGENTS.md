@@ -112,7 +112,9 @@ Test only: `publish = false`, never a dependency of another crate.
   - `healed.rs` → goal 2 for the journal controller (#1564 (journal controller, version 1)):
     `HEALED` (after the settle rounds, each member of the configuration in force runs and the
     fresh controller is `Steady`, or it holds `NoSpare` for a member that is down while no
-    spare runs, counted by the driver), `NO_FALSE_SILENCE` (once the faults stop, an order of
+    spare runs, counted by the driver; and each node that runs outside it, that a configuration
+    named or that leaves the cell, retired once the leader made a floor effective),
+    `NO_FALSE_SILENCE` (once the faults stop, an order of
     the fresh controller removes no member that runs). It never calls the rules of
     `paros_consensus::controller`.
 - `cluster.rs` + `cluster/` → `Cluster`, the model of a deployment of `ColocatedNode`s, and its driver
@@ -151,7 +153,9 @@ Test only: `publish = false`, never a dependency of another crate.
     each tick the driver gathers the `feedback()` of every party that runs (in the chaos, one
     feedback in four is lost), the fresh controller observes each round at once and the stale
     one `LAG` rounds late, both decide with `controller::evaluate` under `POLICY`, and the driver
-    carries each order with `reconfigure`, `check_retirement` and `may_retire`. At the calm, one
+    carries each order with `reconfigure`, `check_retirement` and `may_retire`. Rule 6 orders no
+    more once the matchmakers checked a node, so the driver keeps each `Retire` it carried and
+    calls the node's `may_retire` at each tick until the node retires (`finish_retirements`). At the calm, one
     member of the configuration in force stops for good (`stop_for_good`). The last node of the
     pool is never offered as a spare, so rule 6 retires it once a floor is effective.
   - `cluster/handover.rs` → `Action::Handover`: each node's driver holds a
@@ -223,7 +227,8 @@ Test only: `publish = false`, never a dependency of another crate.
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
-- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::DropOrders`: the driver drops every order of the controllers, caught by `HEALED`; `Mutant::LateView`: the fresh controller sees the stale rounds, caught by `NO_FALSE_SILENCE`; `Mutant::EarlyPublish`: a leader's driver
+- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::DropOrders`: the driver drops every order of the controllers, caught by `HEALED`; `Mutant::DropRetires`: the driver drops every `Retire` order, so the
+  node that leaves runs on, caught by `HEALED`; `Mutant::LateView`: the fresh controller sees the stale rounds, caught by `NO_FALSE_SILENCE`; `Mutant::EarlyPublish`: a leader's driver
   publishes the end of the tail segment as the leader admits a `Roll`, caught by `CHAIN_TRUE`;
   `Mutant::RouteFromTail`: a leader's driver routes each `Commit` to the replicas of the tail
   segment of the leader's fold, caught by `ROUTE_TRUE`;

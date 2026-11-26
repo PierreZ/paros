@@ -18,13 +18,13 @@
 //! the fresh controller is `Steady`, or it holds for a reason that the
 //! oracle confirms from the cluster with its own count.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use moonpool_walk::{Cx, Phase, sometimes};
-use paros_consensus::NodeId;
 use paros_consensus::contract::feedback::{MatchmakerFeedback, NodeFeedback, ProxyFeedback};
 use paros_consensus::controller::{Decision, Order, Policy, Spare, View, evaluate};
 use paros_consensus::node::ReconfigureResult;
+use paros_consensus::{Ballot, NodeId};
 
 use super::{Cluster, ClusterEvent, Mutant, reach};
 use crate::oracle::healed::{Facts, HEALED, judge, judge_order};
@@ -68,6 +68,11 @@ pub(super) struct Controllers {
     members: BTreeSet<NodeId>,
     /// The member that stopped for good when the faults stopped.
     pub(super) dead: Option<NodeId>,
+    /// Each node that the driver started to retire, with the watermarks of
+    /// its `Retire` orders. Rule 6 orders no more once the node's mark is
+    /// checked, so the node's own driver keeps the order and calls
+    /// `may_retire` at each control round until the node retires.
+    retiring: BTreeMap<NodeId, BTreeSet<Ballot>>,
 }
 
 impl Cluster {
@@ -78,6 +83,7 @@ impl Cluster {
             return;
         }
         let chaos = cx.phase() == Phase::Chaos;
+        self.finish_retirements(cx);
         let round = self.gather();
         let lost: Vec<bool> =
             (0..round.nodes.len() + round.proxies.len() + round.matchmakers.len())
@@ -114,8 +120,8 @@ impl Cluster {
             matches!(stale, Decision::Order(_)),
             reach::CONTROL_STALE_ORDER
         );
-        if !chaos && let Decision::Order(order) = &fresh {
-            let members = self.leader_members();
+        if !chaos && let Decision::Order(order @ Order::Reconfigure { leader, .. }) = &fresh {
+            let members = self.members_of(*leader);
             judge_order(order, &members, |id| self.node(id).live.is_some());
         }
         for decision in [fresh, stale] {
@@ -217,24 +223,64 @@ impl Cluster {
                 node: id,
                 watermark,
             } => {
-                if self.asked_names(id, watermark) {
+                if self.flavor.mutant == Some(Mutant::DropRetires)
+                    || self.asked_names(id, watermark)
+                {
                     return;
                 }
                 let Some(node) = self.node_mut(id).live.as_mut() else {
                     return;
                 };
                 if node.may_retire(watermark) {
-                    sometimes!(true, reach::CONTROL_RETIRED);
-                    cx.record(ClusterEvent::Retire { node: id });
-                    self.retired.insert(id);
-                    self.crash_node(id, cx);
-                    cx.crashed(&super::Party::Node(id));
+                    self.retire_for_good(id, cx);
                     return;
                 }
                 let _ = node.check_retirement(watermark);
+                self.control
+                    .retiring
+                    .entry(id)
+                    .or_default()
+                    .insert(watermark);
                 self.drain_node(id, cx);
             }
         }
+    }
+
+    /// The driver of each node that it started to retire: once the
+    /// matchmakers checked the node, the node's own `may_retire` decides, at
+    /// the node, with no further order of a controller.
+    fn finish_retirements(&mut self, cx: &mut Cx<'_, Self>) {
+        let retiring: Vec<(NodeId, Vec<Ballot>)> = self
+            .control
+            .retiring
+            .iter()
+            .map(|(id, marks)| (*id, marks.iter().copied().collect()))
+            .collect();
+        for (id, watermarks) in retiring {
+            if self.retired.contains(&id) {
+                self.control.retiring.remove(&id);
+                continue;
+            }
+            let Some(node) = self.node(id).live.as_ref() else {
+                continue;
+            };
+            let checked = node.retire_mark().checked;
+            if checked && watermarks.iter().any(|w| node.may_retire(*w)) {
+                sometimes!(true, reach::CONTROL_RETIRED_CHECKED);
+                self.retire_for_good(id, cx);
+            }
+        }
+    }
+
+    /// Retire the node `id`: it leaves the journal for good.
+    fn retire_for_good(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
+        assert!(!self.retired.contains(&id), "a node retires once");
+        sometimes!(true, reach::CONTROL_RETIRED);
+        cx.record(ClusterEvent::Retire { node: id });
+        self.retired.insert(id);
+        self.control.retiring.remove(&id);
+        self.crash_node(id, cx);
+        cx.crashed(&super::Party::Node(id));
     }
 
     /// When the faults stop, a member of the configuration in force stops
@@ -290,6 +336,21 @@ impl Cluster {
                 && !self.retired.contains(id)
                 && !self.control.members.contains(id)
         });
+        // A node that runs outside the configuration in force, and that a
+        // configuration named or that leaves the cell, retires once the
+        // leader made a floor effective: rule 6 orders it, and its driver
+        // finishes it.
+        let lingering: Vec<NodeId> = if node.gc_effective().is_some() {
+            self.pool
+                .iter()
+                .copied()
+                .filter(|id| !members.contains(id) && self.node(*id).live.is_some())
+                .filter(|id| Some(*id) == self.leaving() || self.control.members.contains(id))
+                .filter(|id| !self.retired.contains(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let decision = evaluate(&self.control.fresh, &self.spares(), &POLICY);
         judge(
             &decision,
@@ -297,15 +358,17 @@ impl Cluster {
                 members,
                 down: &down,
                 spare_runs,
+                lingering: &lingering,
             },
         )
     }
 
-    /// The members of the configuration of a leader, or none.
-    fn leader_members(&self) -> Vec<NodeId> {
-        self.leaders()
-            .first()
-            .and_then(|id| self.node(*id).live.as_ref())
+    /// The members of the configuration of the node `leader` that an order
+    /// names, or none when it does not run.
+    fn members_of(&self, leader: NodeId) -> Vec<NodeId> {
+        self.node(leader)
+            .live
+            .as_ref()
             .map_or_else(Vec::new, |node| node.acceptors().members().to_vec())
     }
 }

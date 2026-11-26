@@ -338,6 +338,7 @@ fn healing() {
             reach::CONTROL_STALE_ORDER,
             reach::CONTROL_RETIRE,
             reach::CONTROL_RETIRED,
+            reach::CONTROL_RETIRED_CHECKED,
             reach::GC_ACKED,
         ],
     );

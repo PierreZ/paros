@@ -32,6 +32,10 @@ pub struct Facts<'a> {
     /// Whether a node of the pool runs outside the configuration, is not
     /// retired, was never a member and is offered as a spare.
     pub spare_runs: bool,
+    /// The nodes that run outside the configuration in force, that a
+    /// configuration named or that leave the cell, and that did not retire
+    /// although the leader made a floor effective.
+    pub lingering: &'a [NodeId],
 }
 
 /// Judge the controller's `decision` once the faults stopped.
@@ -41,6 +45,12 @@ pub struct Facts<'a> {
 /// What is still missing: the walk settles again, and fails the seed when
 /// it is still missing after the last settle round.
 pub fn judge(decision: &Decision, facts: &Facts<'_>) -> Result<(), String> {
+    if !facts.lingering.is_empty() {
+        return Err(format!(
+            "{HEALED}: nodes {:?} run outside {:?} past an effective floor and did not retire",
+            facts.lingering, facts.members
+        ));
+    }
     match decision {
         Decision::Steady if facts.down.is_empty() => Ok(()),
         Decision::Hold(HoldReason::NoSpare { node })
