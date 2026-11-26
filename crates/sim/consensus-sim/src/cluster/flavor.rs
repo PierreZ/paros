@@ -47,6 +47,10 @@ pub struct Flavor {
     pub limits: Limits,
     /// The bug planted in the driver, for a control run.
     pub mutant: Option<Mutant>,
+    /// Two journal controllers run at each tick, and a member of the
+    /// configuration in force stops for good when the faults stop
+    /// (`cluster/control.rs`).
+    pub controllers: bool,
 }
 
 /// The steer of a walk: the one rare protocol event that the walk moves
@@ -111,6 +115,7 @@ impl Flavor {
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
+            controllers: false,
         }
     }
 
@@ -404,6 +409,25 @@ impl Flavor {
         }
     }
 
+    /// The journal controller (#1564 (journal controller, version 1)):
+    /// matchmakers, three acceptors and three spares, and two controllers,
+    /// one with a view that lags. When the faults stop, a member of the
+    /// configuration in force stops for good, and the controllers must
+    /// replace it (goal 2). The driver offers the last spare to no
+    /// controller (a machine that leaves the cell), so once a floor is
+    /// effective the controllers retire it. The operator makes no move:
+    /// each reconfiguration and each retirement is a controller's order.
+    #[must_use]
+    pub fn healing() -> Self {
+        Self {
+            name: "healing",
+            spares: 3,
+            options: &[],
+            controllers: true,
+            ..Self::matchmakers()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]
@@ -549,6 +573,21 @@ pub enum Mutant {
     /// folds the next `Roll` another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimSegment,
+    /// The driver drops every order of the journal controllers: the member
+    /// that stopped for good stays in the configuration. Caught by
+    /// [`HEALED`](crate::oracle::healed::HEALED) at the end of the settle
+    /// rounds.
+    DropOrders,
+    /// The driver drops every `Retire` order of the journal controllers:
+    /// the node that leaves the cell runs on past an effective floor.
+    /// Caught by [`HEALED`](crate::oracle::healed::HEALED) at the end of the
+    /// settle rounds.
+    DropRetires,
+    /// The driver feeds the fresh controller the rounds of the stale one:
+    /// its view lags. Once the faults stop it replaces a member that the
+    /// leader missed while it was down, and that runs again. Caught by
+    /// [`NO_FALSE_SILENCE`](crate::oracle::healed::NO_FALSE_SILENCE).
+    LateView,
     /// The driver of a leader publishes the end of the tail segment as soon
     /// as the leader admits a `Roll`, before the log chooses it: a publish on
     /// a proposal (`Source = "proposed"` of `specs/tla/handover-scalars/`).

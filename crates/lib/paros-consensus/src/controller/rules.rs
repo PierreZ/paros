@@ -282,6 +282,10 @@ pub fn evaluate(view: &View, spares: &[Spare], policy: &Policy) -> Decision {
     }
     // Rule 6.
     if let Some(order) = retirable(view, policy, config, leading, spares) {
+        probe!(
+            reachable,
+            "controller: rule 6 orders a node outside the configuration to retire"
+        );
         return Decision::Order(order);
     }
     // Rule 7.
@@ -305,6 +309,10 @@ pub fn evaluate(view: &View, spares: &[Spare], policy: &Policy) -> Decision {
         match replacement(view, policy, leader, &fresh, node, spares) {
             Ok(next) => {
                 // Rule 14.
+                probe!(
+                    reachable,
+                    "controller: rule 14 orders a spare in place of a silent member"
+                );
                 assert!(!next.contains(node), "the silent member leaves");
                 assert!(
                     next != *config,

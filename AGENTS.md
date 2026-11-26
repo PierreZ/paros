@@ -136,7 +136,7 @@ its recorded walks at the edited event or after it (#1308 (mutate recorded trace
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
-unreached probes)). Every one of the 80 probes is reached in CI, with no list of excused probes
+unreached probes)). Every probe of the core is reached in CI, with no list of excused probes
 (Pierre, 2026-11-19: no excuses in simulation, no allow lists; each job of the gate has 30 minutes of CI, Pierre 2026-11-20).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data

@@ -9,7 +9,7 @@
 //! always checks, 1), `TRACE_FROM` (the first seed, 1), `TRACE_SEARCH`
 //! (the seeds a flavor may search for its rules, 300), `TRACE_CHAOS`
 //! (chaos steps of a cluster walk, 150), `TRACE_QUIET` (quiet steps of a
-//! cluster walk, 10; 250 for a retiring or a reconfiguring walk), `TRACE_MAX_EVENTS` (the longest
+//! cluster walk, 10; 250 for a retiring or a reconfiguring walk, 120 for a healing walk), `TRACE_MAX_EVENTS` (the longest
 //! trace TLC checks, 200), and `TRACE_DUMP` (print every event of each
 //! checked cluster walk).
 
@@ -114,8 +114,11 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
     );
 }
 
-/// A cluster walk of `chaos` chaos steps, then its quiet steps: 10, or 250
-/// for a [`Steer::Retiring`] or a [`Steer::Reconfiguring`] walk. A
+/// A cluster walk of `chaos` chaos steps, then its quiet steps: 10, 250
+/// for a [`Steer::Retiring`] or a [`Steer::Reconfiguring`] walk, and 120
+/// for a walk with controllers: their order to replace the node that
+/// stopped for good follows the calm, and a walk of 250 quiet steps keeps
+/// too many events for TLC to check one that also fills a gap. A
 /// retirement and a proxy round under a new configuration each follow an
 /// operator move on a calm cluster: a retirement needs a leader that
 /// stands while its GC floor becomes effective and every matchmaker checks
@@ -125,6 +128,8 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
 fn cluster_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cluster> {
     let quiet = if flavor.steer == Steer::Retiring || flavor.steer == Steer::Reconfiguring {
         250
+    } else if flavor.controllers {
+        120
     } else {
         10
     };
@@ -268,6 +273,14 @@ fn tlc_accepts_the_compartment_walks() {
 #[test]
 fn tlc_accepts_the_matchmaker_walks() {
     accepts(Spec::Matchmaker, &Flavor::matchmakers());
+}
+
+/// The walks of the journal controller: each reconfiguration and each
+/// retirement is a controller's order, carried with the calls of today, so
+/// the matchmaker spec follows them as it follows an operator's.
+#[test]
+fn tlc_accepts_the_healing_walks() {
+    accepts(Spec::Matchmaker, &Flavor::healing());
 }
 
 /// The walks that roll: the matchmaker spec follows them with each `Roll` as

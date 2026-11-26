@@ -85,7 +85,7 @@ impl Cluster {
 
     /// Whether a reconfiguration the operator asked for above `floor`
     /// names `id`: the operator's half of a retirement.
-    fn asked_names(&self, id: NodeId, floor: Ballot) -> bool {
+    pub(super) fn asked_names(&self, id: NodeId, floor: Ballot) -> bool {
         self.asked
             .iter()
             .any(|(ballot, members)| *ballot > floor && members.contains(&id))

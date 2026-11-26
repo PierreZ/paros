@@ -4,6 +4,7 @@
 
 use consensus_sim::campaign::try_campaign;
 use consensus_sim::cluster::{Cluster, Flavor, Mutant};
+use consensus_sim::oracle::healed::{HEALED, NO_FALSE_SILENCE};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
     CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND,
@@ -152,4 +153,19 @@ fn a_site_longer_than_the_table_keeps_is_refused() {
 #[test]
 fn a_rewound_handoff_is_caught_by_one_proposal_per_ballot() {
     caught(Flavor::handoff(), Mutant::RewindHandoff, 400, ONE_PROPOSAL);
+}
+
+#[test]
+fn dropped_controller_orders_are_caught_by_goal_2() {
+    caught(Flavor::healing(), Mutant::DropOrders, 5, HEALED);
+}
+
+#[test]
+fn dropped_retire_orders_are_caught_by_goal_2() {
+    caught(Flavor::healing(), Mutant::DropRetires, 5, HEALED);
+}
+
+#[test]
+fn a_controller_with_a_late_view_is_caught_by_no_false_silence() {
+    caught(Flavor::healing(), Mutant::LateView, 60, NO_FALSE_SILENCE);
 }
