@@ -206,7 +206,10 @@ impl<Id: Copy + Ord> Authority<Id> {
 
     /// The windows in a row that each member of the configuration missed,
     /// counted at each close ([`Authority::close`]). A member with no entry
-    /// acked the last window that closed.
+    /// acked the last window that closed. The count follows the window
+    /// boundary: a healthy member whose ack arrives later than one window
+    /// after the beat is counted every time. The count only observes, so
+    /// that costs nothing; a reader sets its threshold above it.
     ///
     /// # Panics
     ///

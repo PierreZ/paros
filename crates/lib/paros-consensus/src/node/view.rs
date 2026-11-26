@@ -611,9 +611,13 @@ impl ColocatedNode {
         missed
     }
 
-    /// Whether this node's last leadership ended because a `CheckQuorum`
-    /// window closed without a Phase-2 quorum. Cleared when the node leads
-    /// again. It only observes.
+    /// Whether this node's last leadership in this incarnation ended because
+    /// a `CheckQuorum` window closed without a Phase-2 quorum. Cleared when
+    /// the node leads again. Volatile: a boot starts it false, so a driver
+    /// that restarts the node loses it. It only observes. It is not a field
+    /// of [`ColocatedNode::counters`], because it is a state and not a
+    /// monotone count; the same holds for [`ColocatedNode::missed_windows`],
+    /// which is per member.
     ///
     /// # Panics
     ///

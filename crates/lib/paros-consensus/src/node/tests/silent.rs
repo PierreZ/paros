@@ -18,6 +18,16 @@ fn a_leader_counts_the_windows_a_silent_member_missed() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     nodes[0].set_election_timeout(2);
+    // Let the windows that node 2 may still have acked close first.
+    for _ in 0..2 {
+        beat_without(&mut nodes, Some(NodeId(2)));
+    }
+    let held_before = nodes[0].counters().quorum_windows_held;
+    let missed_before = nodes[0]
+        .missed_windows()
+        .iter()
+        .find(|(id, _)| *id == NodeId(2))
+        .map_or(0, |(_, w)| *w);
     // Node 2 hears nothing: each window closes with the ack of node 1 only.
     for _ in 0..6 {
         beat_without(&mut nodes, Some(NodeId(2)));
@@ -27,9 +37,13 @@ fn a_leader_counts_the_windows_a_silent_member_missed() {
     assert_eq!(missed.len(), 1, "only node 2 missed: {missed:?}");
     let (who, windows) = missed[0];
     assert_eq!(who, NodeId(2));
-    assert!(windows >= 2, "node 2 missed each closed window: {windows}");
-    let held = nodes[0].counters().quorum_windows_held;
-    assert!(windows <= held, "a member misses only windows that closed");
+    let closed = nodes[0].counters().quorum_windows_held - held_before;
+    assert!(closed >= 2, "windows closed: {closed}");
+    assert_eq!(
+        windows - missed_before,
+        closed,
+        "node 2 missed exactly each window that closed"
+    );
     // Node 2 is back: its next ack forgets the count.
     for _ in 0..4 {
         beat_without(&mut nodes, None);
@@ -69,6 +83,32 @@ fn a_leader_that_loses_its_window_says_so_until_it_leads_again() {
     // It wins again: the flag is cleared.
     make_leader(&mut nodes, 0);
     assert!(!nodes[0].quorum_window_lost(), "a new leadership clears it");
+}
+
+#[test]
+fn a_leader_that_steps_down_for_another_reason_lost_no_window() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(2);
+    for _ in 0..4 {
+        beat_without(&mut nodes, Some(NodeId(2)));
+    }
+    assert!(
+        !nodes[0].missed_windows().is_empty(),
+        "node 2 missed windows"
+    );
+    nodes[0].step_down();
+    assert!(!nodes[0].is_leader(), "the leader stepped down");
+    assert!(
+        !nodes[0].quorum_window_lost(),
+        "a step-down that no lost window caused sets no flag"
+    );
+    // A new leadership starts with no count: the count died with the old.
+    make_leader(&mut nodes, 0);
+    assert!(
+        nodes[0].missed_windows().is_empty(),
+        "a new leadership inherits no count"
+    );
 }
 
 #[test]
