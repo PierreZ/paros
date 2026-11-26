@@ -2774,7 +2774,7 @@ check of that folder. The module adds:
   (`JumpTo = "past"`, with the history `past`), since a `TrimmedTo` carries the floor of the
   peer (`serve_catchup`); `TrimPoints` also takes points below that floor, which no node held.
   The model's `Compact` ignores the retries, and no check of this folder has a `Truncate`.
-  Every retry check has one ballot (`NB = 1`), so no recovery runs over a kept floor.
+  Every retry check has one ballot (`NB = 1`), no restart and one `Hold` at its last slot: no recovery runs over a kept floor, no retry is chosen above a floor, and no jump carries an older floor above 0.
 
 | Constant | Values (first: the rule) |
 |---|---|

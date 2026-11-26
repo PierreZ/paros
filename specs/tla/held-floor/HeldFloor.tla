@@ -403,10 +403,11 @@ OneAnswer == \A x, y \in answers : x.at = y.at /\ x.pos = y.pos => x.ans = y.ans
 \* write.
 DupHasRecord == \A x \in answers : x.ans = "dup" => x.has
 
-\* A retry finds its write: the floor of each acceptor is closed. It holds
-\* across the steps that choose a retry, and across the drop at a `Hold`,
-\* which `FloorsHeld` does not constrain, and across the jumps: it checks
-\* that each floor stays closed as the log grows.
+\* A retry finds its write: the floor of each acceptor is closed. It
+\* judges the drop at a `Hold`, which `FloorsHeld` does not constrain, the
+\* jumps, and the steps that choose a retry. In every check the `Hold` is
+\* the last slot and there is one `Hold`, so no retry is chosen above a
+\* floor and no jump carries an older floor above 0.
 RetryKept == \A a \in Acceptors : Closed(floor[a])
 
 \* A node drops a segment only on a `Hold` of a held segment (with
