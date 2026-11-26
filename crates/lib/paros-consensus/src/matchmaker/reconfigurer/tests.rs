@@ -1,10 +1,9 @@
 use super::*;
+use crate::contract::limits::Limits;
 use crate::journal::Chain;
 use crate::matchmaker::MatchmakerPhase;
 use crate::matchmaker::{MatchRequest, Matchmaker, MatchmakerConfig, MemRegistry, Registration};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
-
-const J: JournalId = JournalId(1);
 
 fn ids(v: &[u64]) -> Vec<MatchmakerId> {
     v.iter().copied().map(MatchmakerId).collect()
@@ -107,7 +106,7 @@ fn route(
 #[test]
 fn a_lost_learned_from_an_activated_member_is_recovered_by_the_re_sent_chosen() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -166,7 +165,7 @@ fn a_lost_learned_from_an_activated_member_is_recovered_by_the_re_sent_chosen() 
 #[test]
 fn a_handover_replaces_one_matchmaker_by_a_spare() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     assert!(r.is_busy());
@@ -223,7 +222,7 @@ fn a_handover_replaces_one_matchmaker_by_a_spare() {
 #[test]
 fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
     let mut pool = pool(5, &[0, 1, 2, 3, 4]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 2]))
         .expect("start");
     // One freeze: counted, three short of the quorum of five.
@@ -244,9 +243,7 @@ fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
     r.on_reply(ReconfigureReply::Stopped {
         matchmaker: MatchmakerId(0),
         generation: MatchmakerGeneration(0),
-        after: None,
-        next: None,
-        registries: BTreeMap::new(),
+        registry: JournalRegistry::default(),
         successor: None,
         decree_promised: Ballot::zero(),
     });
@@ -265,7 +262,7 @@ fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
 #[test]
 fn a_short_decree_quorum_reports_what_is_missing() {
     let mut pool = pool(6, &[0, 1, 2, 3, 4]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 5]))
         .expect("start");
     // Freeze a quorum, bootstrap every proposed member, open the decree.
@@ -326,7 +323,6 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
     };
     for (i, members) in [0_u64, 5].into_iter().enumerate() {
         disagreeing[i].step(MatchRequest::new(
-            J,
             NodeId(9),
             b,
             cfg(members),
@@ -334,18 +330,17 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
         ));
         disagreeing[i].ready().advance();
     }
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     // Freeze both disagreeing members before the beat closes the stop.
     deliver(&mut r, &mut disagreeing, &[2]);
     let reconstruction = r.close_stop().expect("the quorum closes");
     assert_eq!(reconstruction.disagreements, 1);
-    assert_eq!(reconstruction.bootstrap.registries[&J].history.len(), 1);
+    assert_eq!(reconstruction.bootstrap.registry.history.len(), 1);
     // A quorum that agrees counts nothing.
     let mut agreeing = pool(3, &[0, 1, 2]);
     for mm in &mut agreeing[..2] {
         mm.step(MatchRequest::new(
-            J,
             NodeId(9),
             b,
             cfg(0),
@@ -353,7 +348,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
         ));
         mm.ready().advance();
     }
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     deliver(&mut r, &mut agreeing, &[2]);
     assert_eq!(r.close_stop().expect("closes").disagreements, 0);
@@ -366,7 +361,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
 #[test]
 fn a_finish_thins_an_even_count_of_answerers_to_an_odd_successor() {
     let mut two = pool(3, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     // Matchmaker 1 never answers: 0 and 2 do.
     deliver(&mut r, &mut two, &[1]);
@@ -377,7 +372,7 @@ fn a_finish_thins_an_even_count_of_answerers_to_an_odd_successor() {
         "two answerers are thinned to the first"
     );
     let mut three = pool(3, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     deliver(&mut r, &mut three, &[]);
     let reconstruction = r.close_stop().expect("the quorum closes");
@@ -396,7 +391,7 @@ fn a_finish_thins_an_even_count_of_answerers_to_an_odd_successor() {
 #[test]
 fn a_learner_that_only_recorded_does_not_count_for_the_successor() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     while !matches!(r.phase(), ReconfigurerPhase::Publishing { .. }) {
@@ -446,7 +441,7 @@ fn a_learner_that_only_recorded_does_not_count_for_the_successor() {
 #[test]
 fn a_dead_matchmaker_is_replaced_without_its_cooperation() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     for _ in 0..8 {
@@ -468,8 +463,8 @@ fn a_dead_matchmaker_is_replaced_without_its_cooperation() {
 #[test]
 fn concurrent_incompatible_proposals_are_serialized_by_the_decree() {
     let mut pool = pool(6, &[0, 1, 2]);
-    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), 0, Limits::DEFAULT);
-    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), 0, Limits::DEFAULT);
+    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), 0);
+    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), 0);
     r1.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3])).expect("r1");
     r2.start(&set(0, &[0, 1, 2]), ids(&[1, 2, 4])).expect("r2");
     // Both freeze and bootstrap.
@@ -517,14 +512,14 @@ fn concurrent_incompatible_proposals_are_serialized_by_the_decree() {
 #[test]
 fn a_late_reconfigurer_adopts_the_successor_it_finds() {
     let mut pool = pool(5, &[0, 1, 2]);
-    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), 0, Limits::DEFAULT);
+    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), 0);
     r1.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3])).expect("r1");
     for _ in 0..8 {
         exchange(&mut r1, &mut pool, &[]);
         r1.resend();
     }
     assert!(!r1.is_busy());
-    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), 0, Limits::DEFAULT);
+    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), 0);
     r2.start(&set(0, &[0, 1, 2]), ids(&[2, 4])).expect("r2");
     let steps = exchange(&mut r2, &mut pool, &[]);
     assert!(
@@ -539,7 +534,7 @@ fn a_late_reconfigurer_adopts_the_successor_it_finds() {
 #[test]
 fn a_nacked_decree_reopens_above_the_refusing_promise() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     // The freeze completes with no decree promise anywhere...
@@ -592,7 +587,7 @@ fn a_nacked_decree_reopens_above_the_refusing_promise() {
 #[test]
 fn a_second_refusal_of_a_preempted_decree_is_ignored_and_raises_the_floor() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -675,7 +670,7 @@ fn a_decree_opens_above_the_stop_quorums_promises() {
         ready.advance();
     }
     // Its fresh incarnation starts from nothing.
-    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -701,7 +696,7 @@ fn a_decree_opens_above_the_stop_quorums_promises() {
     assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
 }
 
-/// Ask `mm` whether `node` may retire from `J` on `watermark`: a retirement
+/// Ask `mm` whether `node` may retire on `watermark`: a retirement
 /// check under generation `g`. Returns whether it agreed (`named` empty).
 fn ask_retire(mm: &mut Matchmaker, node: u64, watermark: Ballot, g: u64) -> bool {
     let believed = AcceptorConfig::new(
@@ -713,7 +708,7 @@ fn ask_retire(mm: &mut Matchmaker, node: u64, watermark: Ballot, g: u64) -> bool
         node: NodeId(node),
     };
     mm.step(
-        MatchRequest::probe(J, NodeId(node), tag, believed, MatchmakerGeneration(g))
+        MatchRequest::probe(NodeId(node), tag, believed, MatchmakerGeneration(g))
             .retiring(watermark, 0),
     );
     let ready = mm.ready();
@@ -741,7 +736,7 @@ fn a_handover_carries_every_retired_node_to_the_successor() {
     // check that never finished. The union still carries both.
     assert!(ask_retire(&mut pool[0], 8, Ballot::zero(), 0));
     assert!(ask_retire(&mut pool[1], 9, Ballot::zero(), 0));
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     for _ in 0..5 {
@@ -750,7 +745,7 @@ fn a_handover_carries_every_retired_node_to_the_successor() {
     assert!(!r.is_busy(), "the handover finished");
     for i in [0, 1, 3] {
         assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
-        let retired = &pool[i].hard_state().journals[&J].retired;
+        let retired = &pool[i].hard_state().journal.retired;
         assert_eq!(
             retired
                 .iter()
@@ -772,18 +767,11 @@ fn a_handover_carries_every_retired_node_to_the_successor() {
             id: MatchmakerId(3),
             bootstrap: ids(&[0, 1, 2]),
         },
-        &MemRegistry::new(
-            pool[3].hard_state().clone(),
-            pool[3]
-                .journals()
-                .map(|j| (j, pool[3].registry(j).clone()))
-                .collect(),
-        ),
+        &MemRegistry::new(pool[3].hard_state().clone(), pool[3].registry().clone()),
         Limits::DEFAULT,
     );
     for mut mm in [pool[3].clone(), rebooted] {
         mm.step(MatchRequest::new(
-            J,
             NodeId(1),
             Ballot {
                 round: 60,
@@ -846,7 +834,7 @@ fn a_stale_stopped_reply_does_not_reuse_a_decree_ballot() {
     let old = set(0, &[0, 1, 2]);
     let mut disk = 0;
     // Incarnation 1 of node 7: target {0,1,3}.
-    let mut r1 = MatchmakerReconfigurer::new(NodeId(7), disk, Limits::DEFAULT);
+    let mut r1 = MatchmakerReconfigurer::new(NodeId(7), disk);
     r1.start(&old, ids(&[0, 1, 3])).expect("start");
     let stops = raw(&mut r1, &mut disk, &mut pool, &[0, 1, 2]);
     // The network duplicates the Stopped reply of matchmaker 1.
@@ -872,7 +860,7 @@ fn a_stale_stopped_reply_does_not_reuse_a_decree_ballot() {
     drop(r1);
 
     // Incarnation 2 of node 7, from the round on disk: target {0,2,4}.
-    let mut r2 = MatchmakerReconfigurer::new(NodeId(7), disk, Limits::DEFAULT);
+    let mut r2 = MatchmakerReconfigurer::new(NodeId(7), disk);
     r2.start(&old, ids(&[0, 2, 4])).expect("start");
     // Its Stop reaches matchmaker 0; the duplicate of mm1's old reply arrives.
     for s in raw(&mut r2, &mut disk, &mut pool, &[0]) {
@@ -908,7 +896,7 @@ fn a_stale_stopped_reply_does_not_reuse_a_decree_ballot() {
     // A third reconfigurer (node 8): its Phase 1 hears matchmakers 0 and 1,
     // which voted at two rounds, so it adopts the vote of the higher one.
     let mut disk8 = 0;
-    let mut r3 = MatchmakerReconfigurer::new(NodeId(8), disk8, Limits::DEFAULT);
+    let mut r3 = MatchmakerReconfigurer::new(NodeId(8), disk8);
     r3.start(&old, ids(&[1, 2, 3])).expect("start");
     for s in raw(&mut r3, &mut disk8, &mut pool, &[0, 1]) {
         r3.on_reply(s);
@@ -936,7 +924,7 @@ fn a_stale_stopped_reply_does_not_reuse_a_decree_ballot() {
 #[test]
 #[should_panic(expected = "an idle reconfigurer's clock is stopped")]
 fn an_idle_reconfigurer_with_a_running_clock_breaks_its_invariants() {
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.elapsed = 1;
     r.assert_invariants();
 }
@@ -944,7 +932,7 @@ fn an_idle_reconfigurer_with_a_running_clock_breaks_its_invariants() {
 #[test]
 #[should_panic(expected = "the minted round is on disk or waits to be written")]
 fn a_minted_round_neither_on_disk_nor_waiting_breaks_the_round_invariant() {
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3);
     r.round = 4;
     r.assert_invariants();
 }
@@ -952,7 +940,7 @@ fn a_minted_round_neither_on_disk_nor_waiting_breaks_the_round_invariant() {
 #[test]
 #[should_panic(expected = "a round waiting to be written is above the round on disk")]
 fn a_waiting_round_at_the_round_on_disk_breaks_the_round_invariant() {
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3);
     r.unpersisted = Some(3);
     r.assert_invariants();
 }
@@ -981,36 +969,11 @@ fn one_registration(round: u64) -> JournalRegistry {
     }
 }
 
-/// Register one belief for each of `journals` at every matchmaker of
-/// `pool`.
-fn register_journals(pool: &mut [Matchmaker], journals: u64) {
-    for mm in pool.iter_mut() {
-        for journal in 1..=journals {
-            mm.step(MatchRequest::new(
-                JournalId(journal),
-                NodeId(1),
-                ballot(1, 1),
-                AcceptorConfig::new(
-                    vec![NodeId(1), NodeId(2), NodeId(3)],
-                    QuorumSystem::Majority,
-                ),
-                MatchmakerGeneration(0),
-            ));
-            mm.ready().advance();
-        }
-    }
-}
-
-/// The reconfigurer reports the limits it was built with, and abandons
-/// nothing when it runs nothing.
+/// An idle reconfigurer abandons nothing, and a running one abandons its
+/// handover.
 #[test]
-fn an_idle_reconfigurer_reports_its_limits_and_abandons_nothing() {
-    let limits = Limits {
-        registry_page: 2,
-        ..Limits::DEFAULT
-    };
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, limits);
-    assert_eq!(r.limits(), limits);
+fn an_idle_reconfigurer_abandons_nothing() {
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     assert!(!r.abandon(), "an idle reconfigurer has nothing to abandon");
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
@@ -1032,7 +995,7 @@ fn a_refusal_supersedes_only_with_a_later_set() {
             successor,
         };
     let started = || {
-        let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+        let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
         r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
             .expect("start");
         r
@@ -1059,89 +1022,28 @@ fn a_refusal_supersedes_only_with_a_later_set() {
     );
 }
 
-/// A frozen page counts only inside its wire hygiene: a continuation page
-/// that repeats the journal at its cursor is ignored, and the right one
+/// A frozen report counts only inside its wire hygiene: a report with a
+/// registration below its own watermark is ignored, and a well-formed one
 /// is counted.
 #[test]
-fn a_frozen_page_that_repeats_its_cursor_is_ignored() {
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+fn a_frozen_report_below_its_watermark_is_ignored() {
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
-    let stopped =
-        |after: Option<u64>, journals: &[u64], next: Option<u64>| ReconfigureReply::Stopped {
-            matchmaker: MatchmakerId(0),
-            generation: MatchmakerGeneration(0),
-            after: after.map(JournalId),
-            next: next.map(JournalId),
-            registries: journals
-                .iter()
-                .map(|journal| (JournalId(*journal), one_registration(*journal)))
-                .collect(),
-            successor: None,
-            decree_promised: Ballot::zero(),
-        };
+    let stopped = |registry: JournalRegistry| ReconfigureReply::Stopped {
+        matchmaker: MatchmakerId(0),
+        generation: MatchmakerGeneration(0),
+        registry,
+        successor: None,
+        decree_promised: Ballot::zero(),
+    };
+    let mut below = one_registration(1);
+    below.gc_watermark = ballot(2, 1);
+    assert_eq!(r.on_reply(stopped(below)), ReconfigurerStep::Ignored);
     assert_eq!(
-        r.on_reply(stopped(None, &[1], Some(1))),
-        ReconfigurerStep::Stopped { remaining: 2 }
-    );
-    assert_eq!(
-        r.on_reply(stopped(Some(1), &[1, 2], None)),
-        ReconfigurerStep::Ignored,
-        "a page holds only journals above its cursor"
-    );
-    assert_eq!(
-        r.on_reply(stopped(Some(1), &[2], None)),
+        r.on_reply(stopped(one_registration(1))),
         ReconfigurerStep::Stopped { remaining: 1 }
     );
-}
-
-/// The bootstrap goes out in pages of the driver's width, and a member
-/// that asks for its next page is told how many members still miss the
-/// whole bootstrap.
-#[test]
-fn a_bootstrap_goes_out_in_pages_of_the_drivers_width() {
-    let mut pool = pool(4, &[0, 1, 2]);
-    register_journals(&mut pool, 5);
-    let limits = Limits {
-        registry_page: 2,
-        ..Limits::DEFAULT
-    };
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, limits);
-    r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
-        .expect("start");
-    deliver(&mut r, &mut pool, &[]);
-    assert!(r.close_stop().is_some());
-    let ready = r.ready();
-    let widths: Vec<usize> = ready
-        .requests()
-        .iter()
-        .map(|(_, request)| match request {
-            ReconfigureRequest::Bootstrap { bootstrap, .. } => bootstrap.registries.len(),
-            other => panic!("expected a bootstrap page, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        widths,
-        vec![2, 2, 2],
-        "each first page is two journals wide"
-    );
-    drop(ready);
-    // Every member holds page one; only matchmaker 0 hears pages two and
-    // three, and so holds the whole bootstrap.
-    let steps = deliver(&mut r, &mut pool, &[]);
-    assert!(
-        steps
-            .iter()
-            .all(|s| *s == ReconfigurerStep::Bootstrapped { remaining: 3 })
-    );
-    deliver(&mut r, &mut pool, &[1, 3]);
-    let steps = deliver(&mut r, &mut pool, &[1, 3]);
-    assert_eq!(steps, vec![ReconfigurerStep::Bootstrapped { remaining: 2 }]);
-    // Matchmaker 1 asks again for its second page: two members still miss
-    // the whole bootstrap.
-    r.resend();
-    let steps = deliver(&mut r, &mut pool, &[3]);
-    assert_eq!(steps, vec![ReconfigurerStep::Bootstrapped { remaining: 2 }]);
 }
 
 /// The decree folds only the answers of its own ballot: an `Accepted` or a
@@ -1149,7 +1051,7 @@ fn a_bootstrap_goes_out_in_pages_of_the_drivers_width() {
 #[test]
 fn a_decree_answer_of_another_ballot_is_ignored() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -1183,15 +1085,15 @@ fn a_decree_answer_of_another_ballot_is_ignored() {
     );
 }
 
-/// A reconstruction holds nothing below a journal's own watermark.
+/// A reconstruction holds nothing below its own watermark.
 #[test]
 fn a_history_below_its_watermark_is_caught() {
-    let mut registries = BTreeMap::from([(J, one_registration(3))]);
-    assert!(holds_nothing_below(&registries));
-    registries.get_mut(&J).expect("J").gc_watermark = ballot(3, 1);
-    assert!(holds_nothing_below(&registries), "at the watermark");
-    registries.get_mut(&J).expect("J").gc_watermark = ballot(4, 1);
-    assert!(!holds_nothing_below(&registries));
+    let mut registry = one_registration(3);
+    assert!(registry.holds_nothing_below());
+    registry.gc_watermark = ballot(3, 1);
+    assert!(registry.holds_nothing_below(), "at the watermark");
+    registry.gc_watermark = ballot(4, 1);
+    assert!(!registry.holds_nothing_below());
 }
 
 /// An even count of answerers drops one, an odd count none, and no
@@ -1207,6 +1109,6 @@ fn odd_answerers_drop_one_of_an_even_count() {
 #[test]
 #[should_panic(expected = "a re-send never drops a queued request")]
 fn a_re_send_that_drops_a_request_breaks_its_postcondition() {
-    let r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    let r = MatchmakerReconfigurer::new(NodeId(7), 0);
     r.assert_requests_since(1);
 }

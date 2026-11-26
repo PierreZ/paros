@@ -16,7 +16,7 @@
 (*     the state of its bootstrap (`Activate`);                            *)
 (*   - "register" and "gcack": a matchmaker that serves its generation     *)
 (*     registers a ballot or raises its floor (`Register`, `GcAck`).       *)
-(* The walk's sibling journal is its own: the trace holds one journal.     *)
+(* A matchmaker serves one journal, and so does the trace.               *)
 (***************************************************************************)
 EXTENDS Generations, Trace, Sequences, TLC
 

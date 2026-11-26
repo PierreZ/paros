@@ -463,7 +463,7 @@ fn hand_over_the_matchmakers(cluster: &mut Cluster, leader: NodeId) {
         .clone();
     // The reconfigurer runs on any machine. `0` is the decree round on its
     // disk: none yet.
-    let mut reconfigurer = MatchmakerReconfigurer::new(leader, 0, Limits::DEFAULT);
+    let mut reconfigurer = MatchmakerReconfigurer::new(leader, 0);
     let mut round_on_disk = 0;
     reconfigurer
         .start(&current, vec![M1, M2, M3])
@@ -569,14 +569,13 @@ fn roll_a_segment(cluster: &mut Cluster, leader: NodeId) {
 
     // Each node publishes the end of a segment after its own fold applied
     // the `Roll`. The matchmakers keep the chain, an add-only map.
-    let journal = cluster.journal_id(leader);
     let chain = cluster
         .matchmaker(M1)
-        .chain(journal)
+        .chain()
         .expect("the matchmakers hold the chain")
         .clone();
     for id in [M2, M3] {
-        assert_eq!(cluster.matchmaker(id).chain(journal), Some(&chain));
+        assert_eq!(cluster.matchmaker(id).chain(), Some(&chain));
     }
     assert_eq!(chain[&SegmentId(0)].end, Some(opened.start));
     assert_eq!(
@@ -639,9 +638,8 @@ fn crash_in_the_full_deployment(cluster: &mut Cluster, leader: NodeId) {
         .gc_effective()
         .expect("an effective watermark");
     assert_eq!(floor, new);
-    let journal = cluster.journal_id(N1);
     for id in [M1, M2, M3] {
-        let registry = cluster.matchmaker(id).registry(journal);
+        let registry = cluster.matchmaker(id).registry();
         assert!(registry.keys().all(|ballot: &Ballot| *ballot >= floor));
     }
     println!("   the matchmakers forget every configuration below {floor}");

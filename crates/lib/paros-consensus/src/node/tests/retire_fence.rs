@@ -77,7 +77,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     let member_at = ballot(3, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), member_at, old.clone(), generation),
     );
     hear_leader(&mut n3, member_at, old.clone(), None);
     assert!(n3.is_acceptor());
@@ -87,10 +87,10 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     let w = ballot(12, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), w, new.clone(), generation),
     );
     for mm in &mut mms {
-        let _ = mm.advance_gc_watermark(J, generation, w);
+        let _ = mm.advance_gc_watermark(generation, w);
         mm.ready().advance();
     }
     // Node 2 missed it: its campaign registers the stale belief at 13. The
@@ -99,7 +99,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     let stale = ballot(13, 2);
     register(
         &mut mms,
-        &MatchRequest::new(J, NodeId(2), stale, old.clone(), generation),
+        &MatchRequest::new(NodeId(2), stale, old.clone(), generation),
     );
     // Node 3 hears the leader at 12: it is outside, its belief is bound to
     // the floor, and the beat carries the floor.
@@ -109,7 +109,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     assert_eq!(n3.gc_floor_heard(), Some(w));
     // Why it matters: the next campaign's `H_b` holds the stale belief,
     // and `{0,1,2}` is no Phase-1 quorum of it.
-    let next = MatchRequest::new(J, NodeId(0), ballot(14, 0), new.clone(), generation);
+    let next = MatchRequest::new(NodeId(0), ballot(14, 0), new.clone(), generation);
     let mut prior = Vec::new();
     for mm in &mut mms {
         mm.step(next.clone());
@@ -154,7 +154,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     // effective above the stale belief: the matchmakers collect it.
     let later = ballot(15, 0);
     for mm in &mut mms {
-        let _ = mm.advance_gc_watermark(J, generation, later);
+        let _ = mm.advance_gc_watermark(generation, later);
         mm.ready().advance();
     }
     hear_leader(&mut n3, later, new, Some(later));
@@ -198,7 +198,6 @@ fn a_restarted_registrant_keeps_the_fence_of_its_registration() {
     assert!(w < b);
     let effective = Some((w, cfg(&[0])));
     let step = n.on_match_reply(MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(1),
         ballot: b,
@@ -220,7 +219,6 @@ fn a_restarted_registrant_keeps_the_fence_of_its_registration() {
     let generation = r.matchmaker_set().expect("a set").generation;
     let _ = persist(&mut r, &mut storage);
     let step = r.on_match_reply(MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(0),
         to: NodeId(1),
         ballot: tag,
@@ -338,20 +336,20 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
     let member_at = ballot(3, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), member_at, old.clone(), generation),
     );
     hear_leader(&mut n2, member_at, old.clone(), None);
     // The reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and 1, and
     // its floor is effective there.
     let w = ballot(12, 0);
-    let reconfigure = MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation);
+    let reconfigure = MatchRequest::reconfigure(NodeId(0), w, new.clone(), generation);
     register(&mut mms[..2], &reconfigure);
     for mm in &mut mms[..2] {
-        let _ = mm.advance_gc_watermark(J, generation, w);
+        let _ = mm.advance_gc_watermark(generation, w);
         mm.ready().advance();
     }
     // Node 1's slow campaign registers the stale belief at matchmaker 0.
-    let stale = MatchRequest::new(J, NodeId(1), ballot(13, 1), old.clone(), generation);
+    let stale = MatchRequest::new(NodeId(1), ballot(13, 1), old.clone(), generation);
     register(&mut mms[..1], &stale);
     // Node 2 hears the leader at 12 with the floor.
     hear_leader(&mut n2, w, new.clone(), Some(w));
@@ -421,7 +419,7 @@ fn retire_node_2(
     let member_at = ballot(3, 0);
     register(
         mms,
-        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), member_at, old.clone(), generation),
     );
     n2.step(Message::Heartbeat {
         from: NodeId(0),
@@ -435,10 +433,10 @@ fn retire_node_2(
     let w = ballot(12, 0);
     register(
         mms,
-        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), w, new.clone(), generation),
     );
     for mm in mms.iter_mut() {
-        let _ = mm.advance_gc_watermark(J, generation, w);
+        let _ = mm.advance_gc_watermark(generation, w);
         mm.ready().advance();
     }
     n2.step(Message::Heartbeat {
@@ -481,7 +479,7 @@ fn a_rejoined_node_is_named_again() {
     let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
     let (w, old, new, generation) = retire_node_2(&mut mms, &mut storage);
     // Every matchmaker now refuses a registration naming node 2.
-    let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old.clone(), generation);
+    let back = MatchRequest::reconfigure(NodeId(0), ballot(19, 0), old.clone(), generation);
     let refused = matchmake(
         &mut mms,
         (0..3).map(|m| (MatchmakerId(m), back.clone())).collect(),
@@ -521,7 +519,7 @@ fn a_rejoined_node_is_named_again() {
         let _ = r.on_match_reply(reply);
         let _ = persist(&mut r, &mut storage);
     }
-    let named = MatchRequest::reconfigure(J, NodeId(0), ballot(20, 0), old.clone(), generation);
+    let named = MatchRequest::reconfigure(NodeId(0), ballot(20, 0), old.clone(), generation);
     let replies = matchmake(
         &mut mms,
         (0..3).map(|m| (MatchmakerId(m), named.clone())).collect(),
@@ -568,7 +566,7 @@ fn a_rejoined_node_is_named_again() {
     assert_eq!(r.retire_mark(), rejoined);
     assert_eq!(storage.retire_mark, rejoined);
     // A registration that names node 2 registers again.
-    let again = MatchRequest::reconfigure(J, NodeId(0), ballot(21, 0), old.clone(), generation);
+    let again = MatchRequest::reconfigure(NodeId(0), ballot(21, 0), old.clone(), generation);
     let replies = matchmake(
         &mut mms,
         (0..3).map(|m| (MatchmakerId(m), again.clone())).collect(),
@@ -581,7 +579,7 @@ fn a_rejoined_node_is_named_again() {
     );
     // A late retirement check of incarnation 0 is refused: the node came
     // back at 1.
-    let late = MatchRequest::probe(J, NodeId(2), ballot(22, 2), new, generation).retiring(w, 0);
+    let late = MatchRequest::probe(NodeId(2), ballot(22, 2), new, generation).retiring(w, 0);
     let replies = matchmake(&mut mms[..1], vec![(MatchmakerId(0), late)]);
     assert!(matches!(
         replies[0].outcome,
@@ -649,7 +647,7 @@ fn a_staged_rejoin_that_never_left_is_sent_again_at_boot() {
         let _ = persist(&mut again, &mut storage);
     }
     assert_eq!(again.retire_mark(), staged);
-    let named = MatchRequest::reconfigure(J, NodeId(0), ballot(20, 0), old, generation);
+    let named = MatchRequest::reconfigure(NodeId(0), ballot(20, 0), old, generation);
     let replies = matchmake(
         &mut mms,
         (0..3).map(|m| (MatchmakerId(m), named.clone())).collect(),
@@ -735,7 +733,6 @@ fn close_rejoin(
 ) {
     for m in 0..3 {
         let _ = n2.on_match_reply(MatchReply {
-            journal: J,
             matchmaker: MatchmakerId(m),
             to: NodeId(2),
             ballot: check_tag,
@@ -782,15 +779,15 @@ fn a_running_journal_booked_again_rejoins() {
     let member_at = ballot(3, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), member_at, old.clone(), generation),
     );
     let w = ballot(12, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), w, new.clone(), generation),
     );
     for mm in &mut mms {
-        let _ = mm.advance_gc_watermark(J, generation, w);
+        let _ = mm.advance_gc_watermark(generation, w);
         mm.ready().advance();
     }
     n2.step(Message::Heartbeat {
@@ -845,7 +842,7 @@ fn a_running_journal_booked_again_rejoins() {
     );
     close_rejoin(&mut n2, &mut storage, &mut mms, requests, check_tag);
     // A registration naming node 2 is taken again.
-    let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old, generation);
+    let back = MatchRequest::reconfigure(NodeId(0), ballot(19, 0), old, generation);
     let answers = matchmake(
         &mut mms,
         (0..3).map(|m| (MatchmakerId(m), back.clone())).collect(),
@@ -899,25 +896,25 @@ fn a_crashed_member_named_by_a_stale_belief_stays_in_the_history() {
     let new = cfg(&[0, 1, 2, 3, 5]);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), ballot(3, 0), old.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), ballot(3, 0), old.clone(), generation),
     );
     let w = ballot(12, 0);
     register(
         &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+        &MatchRequest::reconfigure(NodeId(0), w, new.clone(), generation),
     );
     for mm in &mut mms {
-        let _ = mm.advance_gc_watermark(J, generation, w);
+        let _ = mm.advance_gc_watermark(generation, w);
         mm.ready().advance();
     }
     // Node 3's stale belief, above the floor. Node 4 crashed, so no
     // matchmaker recorded it and nothing refuses the registration.
     register(
         &mut mms,
-        &MatchRequest::new(J, NodeId(3), ballot(13, 3), old.clone(), generation),
+        &MatchRequest::new(NodeId(3), ballot(13, 3), old.clone(), generation),
     );
     // Nodes 0 and 1 crash. Node 2 campaigns under the configuration in force.
-    let next = MatchRequest::new(J, NodeId(2), ballot(14, 2), new.clone(), generation);
+    let next = MatchRequest::new(NodeId(2), ballot(14, 2), new.clone(), generation);
     let mut prior = Vec::new();
     let mut registered = 0;
     for mm in &mut mms {

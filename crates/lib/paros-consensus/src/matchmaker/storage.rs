@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 
 use super::{MatchmakerHardState, MatchmakerWriteOp, Registration};
-use crate::journal::JournalId;
 use crate::types::Ballot;
 
 /// The read-only recovery port of a matchmaker — the registry's
@@ -50,15 +49,14 @@ pub trait RegistryStorage {
     /// construction.
     fn initial_state(&self) -> MatchmakerHardState;
 
-    /// The record registered under `ballot` in `journal`'s registry, if any
-    /// — the per-record read, the twin of [`crate::Storage::accepted`].
-    fn registration(&self, journal: JournalId, ballot: Ballot) -> Option<Registration>;
+    /// The record registered under `ballot`, if any — the per-record
+    /// read, the twin of [`crate::Storage::accepted`].
+    fn registration(&self, ballot: Ballot) -> Option<Registration>;
 
-    /// Every registered `(journal, ballot)` in ascending order — the
-    /// registries' identities, the twin of the `first_slot..=last_slot`
-    /// walk (#190: one registry per journal of the set). Each names a
-    /// record [`Self::registration`] serves.
-    fn registered(&self) -> Vec<(JournalId, Ballot)>;
+    /// Every registered ballot in ascending order — the registry's
+    /// identities, the twin of the `first_slot..=last_slot` walk. Each
+    /// names a record [`Self::registration`] serves.
+    fn registered(&self) -> Vec<Ballot>;
 }
 
 /// The reference in-memory registry: the durable scalars and the per-ballot
@@ -76,7 +74,7 @@ pub trait RegistryStorage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemRegistry {
     hard_state: MatchmakerHardState,
-    registry: BTreeMap<JournalId, BTreeMap<Ballot, Registration>>,
+    registry: BTreeMap<Ballot, Registration>,
 }
 
 impl MemRegistry {
@@ -84,14 +82,12 @@ impl MemRegistry {
     #[must_use]
     pub fn new(
         hard_state: MatchmakerHardState,
-        registrations: BTreeMap<JournalId, BTreeMap<Ballot, Registration>>,
+        registrations: BTreeMap<Ballot, Registration>,
     ) -> Self {
-        let mut registry = Self {
+        Self {
             hard_state,
             registry: registrations,
-        };
-        registry.registry.retain(|_, ledger| !ledger.is_empty());
-        registry
+        }
     }
 
     /// The durable scalars as they stand.
@@ -100,34 +96,25 @@ impl MemRegistry {
         &self.hard_state
     }
 
-    /// The registration records as they stand, per journal in ballot
-    /// order (a journal with no record is absent).
+    /// The registration records as they stand, in ballot order.
     #[must_use]
-    pub fn registrations(&self) -> &BTreeMap<JournalId, BTreeMap<Ballot, Registration>> {
+    pub fn registrations(&self) -> &BTreeMap<Ballot, Registration> {
         &self.registry
     }
 
-    /// Drop `journal`'s records below `watermark`.
-    fn collect(&mut self, journal: JournalId, watermark: Ballot) {
-        if let Some(ledger) = self.registry.get_mut(&journal) {
-            *ledger = ledger.split_off(&watermark);
-            if ledger.is_empty() {
-                self.registry.remove(&journal);
-            }
-        }
+    /// Drop the records below the durable watermark.
+    fn collect(&mut self) {
+        self.registry = self.registry.split_off(&self.hard_state.gc_watermark());
     }
 
     /// Apply one staged write, with the semantics the op documents:
-    /// [`Register`](MatchmakerWriteOp::Register) appends the record to its
-    /// journal's registry;
+    /// [`Register`](MatchmakerWriteOp::Register) appends the record;
     /// [`SetGcWatermark`](MatchmakerWriteOp::SetGcWatermark) raises the
-    /// journal's watermark (never lowers it) and drops every record of that
-    /// journal below it;
+    /// watermark (never lowers it) and drops every record below it;
     /// [`SetScalars`](MatchmakerWriteOp::SetScalars) replaces the scalars,
-    /// keeping per journal the higher of the two watermarks and dropping
-    /// below it;
+    /// keeping the higher of the two watermarks and dropping below it;
     /// [`InstallRegistry`](MatchmakerWriteOp::InstallRegistry) replaces both,
-    /// each journal's records filtered at its installed watermark.
+    /// the records filtered at the installed watermark.
     ///
     /// # Panics
     ///
@@ -136,47 +123,34 @@ impl MemRegistry {
     pub fn apply(&mut self, op: &MatchmakerWriteOp) {
         match op {
             MatchmakerWriteOp::Register {
-                journal,
                 ballot,
                 registration,
             } => {
                 // The persist half of the pair `Matchmaker::new` reads back:
-                // a registration lands at or above its journal's floor.
+                // a registration lands at or above the floor.
                 assert!(
-                    *ballot >= self.hard_state.gc_watermark(*journal),
+                    *ballot >= self.hard_state.gc_watermark(),
                     "a registration is persisted at or above the watermark"
                 );
-                self.registry
-                    .entry(*journal)
-                    .or_default()
-                    .insert(*ballot, registration.clone());
+                self.registry.insert(*ballot, registration.clone());
             }
-            MatchmakerWriteOp::SetGcWatermark { journal, watermark } => {
-                if *watermark > self.hard_state.gc_watermark(*journal) {
-                    self.hard_state.journal_mut(*journal).gc_watermark = *watermark;
-                    self.collect(*journal, *watermark);
+            MatchmakerWriteOp::SetGcWatermark { watermark } => {
+                if *watermark > self.hard_state.gc_watermark() {
+                    self.hard_state.journal.gc_watermark = *watermark;
+                    self.collect();
                 }
                 assert!(
-                    self.hard_state.gc_watermark(*journal) >= *watermark,
+                    self.hard_state.gc_watermark() >= *watermark,
                     "a persisted watermark covers the raise"
                 );
             }
             MatchmakerWriteOp::SetScalars(scalars) => {
-                let held = std::mem::replace(&mut self.hard_state, scalars.clone());
-                // Every journal keeps the higher of the two watermarks.
-                for (journal, kept) in held.journals {
-                    let watermark = self.hard_state.gc_watermark(journal).max(kept.gc_watermark);
-                    self.hard_state.journal_mut(journal).gc_watermark = watermark;
-                }
-                let floors: Vec<(JournalId, Ballot)> = self
-                    .hard_state
-                    .journals
-                    .iter()
-                    .map(|(journal, scalars)| (*journal, scalars.gc_watermark))
-                    .collect();
-                for (journal, watermark) in floors {
-                    self.collect(journal, watermark);
-                }
+                let kept = self.hard_state.gc_watermark();
+                self.hard_state = scalars.clone();
+                // The store keeps the higher of the two watermarks.
+                let watermark = self.hard_state.gc_watermark().max(kept);
+                self.hard_state.journal.gc_watermark = watermark;
+                self.collect();
             }
             MatchmakerWriteOp::InstallRegistry {
                 scalars,
@@ -184,25 +158,17 @@ impl MemRegistry {
             } => {
                 self.hard_state = scalars.clone();
                 self.registry = registrations
-                    .iter()
-                    .map(|(journal, ledger)| {
-                        let watermark = scalars.gc_watermark(*journal);
-                        let kept: BTreeMap<Ballot, Registration> = ledger
-                            .range(watermark..)
-                            .map(|(b, r)| (*b, r.clone()))
-                            .collect();
-                        (*journal, kept)
-                    })
-                    .filter(|(_, ledger)| !ledger.is_empty())
+                    .range(scalars.gc_watermark()..)
+                    .map(|(b, r)| (*b, r.clone()))
                     .collect();
             }
         }
-        // Whatever the op, the store holds nothing below a journal's floor.
+        // Whatever the op, the store holds nothing below the floor.
         assert!(
-            self.registry.iter().all(|(journal, ledger)| ledger
+            self.registry
                 .keys()
                 .next()
-                .is_none_or(|b| *b >= self.hard_state.gc_watermark(*journal))),
+                .is_none_or(|b| *b >= self.hard_state.gc_watermark()),
             "a persisted registry holds nothing below its watermark"
         );
     }
@@ -213,17 +179,11 @@ impl RegistryStorage for MemRegistry {
         self.hard_state.clone()
     }
 
-    fn registration(&self, journal: JournalId, ballot: Ballot) -> Option<Registration> {
-        self.registry
-            .get(&journal)
-            .and_then(|ledger| ledger.get(&ballot))
-            .cloned()
+    fn registration(&self, ballot: Ballot) -> Option<Registration> {
+        self.registry.get(&ballot).cloned()
     }
 
-    fn registered(&self) -> Vec<(JournalId, Ballot)> {
-        self.registry
-            .iter()
-            .flat_map(|(journal, ledger)| ledger.keys().map(|ballot| (*journal, *ballot)))
-            .collect()
+    fn registered(&self) -> Vec<Ballot> {
+        self.registry.keys().copied().collect()
     }
 }

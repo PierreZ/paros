@@ -676,9 +676,10 @@ mod tests {
     use super::*;
     use paros_consensus::NodeId;
     use paros_consensus::Value;
-    use paros_consensus::journal::JournalId;
     use paros_consensus::journal::{Entry, LeaderUuid, Seq};
-    use paros_consensus::matchmaker::{BootstrapPage, MatchRefusal, MatchmakerPhase, Registration};
+    use paros_consensus::matchmaker::{
+        JournalRegistry, MatchRefusal, MatchmakerPhase, PendingBootstrap, Registration,
+    };
     use paros_consensus::membership::{
         AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
     };
@@ -779,7 +780,6 @@ mod tests {
         let stop = reconfigure(&ReconfigureRequest::Stop {
             from,
             generation: MatchmakerGeneration(3),
-            after: None,
         });
         assert_eq!(stop.fields, vec![field("generation", "3")]);
         assert_eq!(
@@ -788,11 +788,9 @@ mod tests {
         );
         let bootstrap = reconfigure(&ReconfigureRequest::Bootstrap {
             from,
-            bootstrap: BootstrapPage {
+            bootstrap: PendingBootstrap {
                 set: set(4, &[2, 1]),
-                after: None,
-                registries: BTreeMap::new(),
-                last: true,
+                registry: JournalRegistry::default(),
             },
         });
         assert_eq!(
@@ -855,9 +853,7 @@ mod tests {
         let stopped = reconfigure_reply(&ReconfigureReply::Stopped {
             matchmaker,
             generation,
-            after: None,
-            next: None,
-            registries: BTreeMap::new(),
+            registry: JournalRegistry::default(),
             successor: None,
             decree_promised: ballot(0, 0),
         });
@@ -869,8 +865,6 @@ mod tests {
         let bootstrapped = reconfigure_reply(&ReconfigureReply::Bootstrapped {
             matchmaker,
             set: set(4, &[1]),
-            held: None,
-            complete: true,
         });
         assert_eq!(bootstrapped.fields, vec![field("generation", "4")]);
         assert_eq!(bootstrapped.voice, "I hold generation 4 as the next one.");
@@ -1164,7 +1158,6 @@ mod tests {
     fn request(purpose: MatchPurpose) -> MatchRequest {
         MatchRequest {
             from: NodeId(0),
-            journal: JournalId(1),
             ballot: ballot(2, 0),
             config: acceptors(&[0, 1, 2]),
             purpose,
@@ -1176,7 +1169,6 @@ mod tests {
     fn reply(outcome: MatchOutcome) -> MatchReply {
         MatchReply {
             matchmaker: MatchmakerId(1),
-            journal: JournalId(1),
             to: NodeId(0),
             ballot: ballot(2, 0),
             generation: MatchmakerGeneration(0),
@@ -1331,7 +1323,6 @@ mod tests {
         let ack = |applied| {
             gc_ack(&GcAck {
                 matchmaker: MatchmakerId(1),
-                journal: JournalId(1),
                 generation: MatchmakerGeneration(0),
                 applied,
                 watermark: ballot(2, 0),

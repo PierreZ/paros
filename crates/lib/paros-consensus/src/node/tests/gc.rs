@@ -68,8 +68,7 @@ fn answer(mms: &mut [Matchmaker], requests: &[(MatchmakerId, GcRequest)]) -> Vec
         .iter()
         .map(|(id, request)| {
             let mm = &mut mms[usize::try_from(id.0).expect("matchmaker index")];
-            let outcome =
-                mm.advance_gc_watermark(request.journal, request.generation, request.watermark);
+            let outcome = mm.advance_gc_watermark(request.generation, request.watermark);
             mm.ready().advance();
             mm.gc_ack(request, outcome)
         })
@@ -132,8 +131,7 @@ fn the_gc_campaign_carries_its_election_fence() {
 }
 
 /// An ack the open campaign did not ask for is ignored whole: one from a
-/// matchmaker outside the set, one for another journal, one at a lower
-/// floor, and any ack at a follower.
+/// matchmaker outside the set, one at a lower floor, and any ack at a follower.
 #[test]
 fn an_ack_the_campaign_did_not_ask_for_is_ignored() {
     let (mut nodes, mut mms) = shrunk_cluster();
@@ -143,15 +141,11 @@ fn an_ack_the_campaign_did_not_ask_for_is_ignored() {
         matchmaker: MatchmakerId(9),
         ..good.clone()
     };
-    let other_journal = GcAck {
-        journal: crate::journal::JournalId(J.0 + 1),
-        ..good.clone()
-    };
     let lower = GcAck {
         watermark: Ballot::zero(),
         ..good.clone()
     };
-    for ack in [&stranger, &other_journal, &lower] {
+    for ack in [&stranger, &lower] {
         assert_eq!(nodes[0].on_gc_ack(ack), GcStep::Ignored, "{ack:?}");
     }
     assert_eq!(
@@ -180,7 +174,6 @@ fn stop(mm: &mut Matchmaker, successor: Option<&crate::membership::MatchmakerSet
     mm.step_reconfigure(crate::matchmaker::ReconfigureRequest::Stop {
         from: NodeId(5),
         generation: MatchmakerGeneration(0),
-        after: None,
     });
     mm.ready().advance();
     if let Some(successor) = successor {
@@ -374,7 +367,6 @@ fn the_successor_s_acks_make_the_floor_effective() {
     let ballot = nodes[0].ballot();
     let ack = |m: u64| GcAck {
         matchmaker: MatchmakerId(m),
-        journal: J,
         generation: MatchmakerGeneration(1),
         applied: true,
         watermark: ballot,
@@ -459,7 +451,6 @@ fn a_check_outlives_its_probe() {
     let _ = drain_match_requests(&mut n);
     for m in [0, 1] {
         let _ = n.on_match_reply(MatchReply {
-            journal: J,
             matchmaker: MatchmakerId(m),
             to: NodeId(3),
             ballot: tag,
@@ -522,7 +513,6 @@ fn a_check_that_closes_under_a_later_belief_lets_nothing_retire() {
         .expect("a probe");
     let _ = drain_match_requests(&mut n);
     let agree = |m: u64| MatchReply {
-        journal: J,
         matchmaker: MatchmakerId(m),
         to: NodeId(3),
         ballot: tag,

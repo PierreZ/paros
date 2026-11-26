@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::journal::{Chain, JournalId};
+use crate::journal::Chain;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId};
 
@@ -100,11 +100,11 @@ impl Retirement {
     }
 }
 
-/// One journal's registry inside a matchmaker set (#190), as a handover
-/// carries it: the watermark, every registration at or above it, and the
-/// effective configuration. A set holds one per journal of its tenant, and
-/// the three stay per journal through every generation: a journal's floor
-/// never moves because of a sibling's.
+/// The journal's registry as a handover carries it: the watermark, every
+/// registration at or above it, the effective configuration, the retirement
+/// records and the chain of segments. A matchmaker serves one journal
+/// (Pierre, 2026-11-22, #1430 (tenant catalog in the cell)), so a frozen
+/// member reports one registry and a successor is bootstrapped from one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalRegistry {
@@ -132,8 +132,8 @@ pub struct JournalRegistry {
 
 impl JournalRegistry {
     /// Whether this registry says nothing: no floor, no record, no
-    /// effective configuration. A journal a matchmaker never heard of reads
-    /// exactly so, and a reconstruction drops such an entry.
+    /// effective configuration, no retirement and no segment. A fresh
+    /// matchmaker reads exactly so.
     #[must_use]
     pub fn is_blank(&self) -> bool {
         self.gc_watermark == Ballot::zero()
@@ -142,133 +142,44 @@ impl JournalRegistry {
             && self.retired.is_empty()
             && self.segments.is_empty()
     }
+
+    /// Whether every registration sits at or above the watermark: what a
+    /// frozen report, a reconstruction and a bootstrap all keep.
+    #[must_use]
+    pub fn holds_nothing_below(&self) -> bool {
+        self.history
+            .keys()
+            .next()
+            .is_none_or(|lowest| *lowest >= self.gc_watermark)
+    }
 }
 
 /// A successor generation's initial state, handed to each of its members by
 /// the reconfigurer and held **pending** until the decree chooses that set.
-/// It arrives one page at a time (#439 (operator calls name their journal)):
-/// a member holds the pages in journal order, and only a whole bootstrap
-/// may be chosen or activated. It becomes the per-record registries only at
-/// activation.
+/// It becomes the per-record registry only at activation.
 ///
-/// **Why pages of two reconstructions may meet.** Two reconfigurers may
-/// bootstrap one proposed set from two frozen quorums. Each reconstruction is
-/// valid journal by journal: every completed registration, effective
-/// configuration and effective floor reached a quorum of the frozen
-/// generation, so every frozen quorum's reconstruction carries it, and a
-/// journal a reconstruction leaves out had nothing to carry. Pages chain by
-/// their cursor, so a held bootstrap covers each journal exactly once, from
-/// one reconstruction or the other: valid either way. A whole bootstrap is
-/// never replaced, so a set chosen on whole bootstraps activates on them.
+/// **Why two reconstructions may meet.** Two reconfigurers may bootstrap
+/// one proposed set from two frozen quorums. Each reconstruction is valid:
+/// every completed registration, effective configuration and effective
+/// floor reached a quorum of the frozen generation, so every frozen quorum's
+/// reconstruction carries it. A member holds the first bootstrap it gets
+/// for a set and never replaces it, so a set chosen on held bootstraps
+/// activates on them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingBootstrap {
     /// The proposed successor set.
     pub set: MatchmakerSet,
-    /// The reconstructed registry of every journal of the set (#190): per
-    /// journal, the maximum watermark, the union at or above it and the
-    /// maximum effective configuration over the frozen quorum. A journal
-    /// absent here has nothing to carry. While `complete` is false, the
-    /// journals up to the last one held.
-    pub registries: BTreeMap<JournalId, JournalRegistry>,
-    /// Whether every page is held (#439). A reconstruction is whole when it
-    /// is made.
-    pub complete: bool,
+    /// The reconstructed registry: the maximum watermark, the union at or
+    /// above it, the maximum effective configuration, and the merge of the
+    /// retirement records and of the chain over the frozen quorum.
+    pub registry: JournalRegistry,
 }
 
-impl PendingBootstrap {
-    /// The last journal held, `None` when none is: a page continues
-    /// strictly above it.
-    #[must_use]
-    pub fn held(&self) -> Option<JournalId> {
-        self.registries.keys().next_back().copied()
-    }
-
-    /// The page of this reconstruction strictly above `after`, at most
-    /// `page` journals; it is the last when nothing follows it.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`REGISTRY_PAGE`](super::REGISTRY_PAGE),
-    /// or the bootstrap is not whole: a programmer error.
-    #[must_use]
-    pub fn page(&self, after: Option<JournalId>, page: usize) -> BootstrapPage {
-        assert!(page > 0, "a bootstrap page carries a journal");
-        assert!(
-            page <= super::REGISTRY_PAGE,
-            "a bootstrap page never exceeds its ceiling"
-        );
-        assert!(self.complete, "only a whole reconstruction is paged out");
-        let above = self
-            .registries
-            .iter()
-            .filter(|(journal, _)| after.is_none_or(|after| **journal > after));
-        let registries: BTreeMap<JournalId, JournalRegistry> = above
-            .clone()
-            .take(page)
-            .map(|(journal, registry)| (*journal, registry.clone()))
-            .collect();
-        let last = above.count() <= page;
-        let cut = BootstrapPage {
-            set: self.set.clone(),
-            after,
-            registries,
-            last,
-        };
-        // A page that is not the last is full, so it moves the cursor.
-        assert!(
-            cut.last || cut.registries.len() == page,
-            "a cut page is full"
-        );
-        assert!(
-            cut.is_well_formed(),
-            "a page of a reconstruction is well formed"
-        );
-        cut
-    }
-}
-
-/// One page of a [`PendingBootstrap`] on the wire (#439): the journals
-/// strictly above `after`, in journal order, at most
-/// [`REGISTRY_PAGE`](super::REGISTRY_PAGE) of them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BootstrapPage {
-    /// The proposed successor set.
-    pub set: MatchmakerSet,
-    /// The cursor: the page holds the journals strictly above it (`None`:
-    /// from the first).
-    pub after: Option<JournalId>,
-    /// The page's reconstructed registries.
-    pub registries: BTreeMap<JournalId, JournalRegistry>,
-    /// Whether the page ends the reconstruction.
-    pub last: bool,
-}
-
-impl BootstrapPage {
-    /// Wire hygiene: every journal strictly above the cursor, at most a
-    /// ceiling of them, none blank, and a page that is not the last holds a
-    /// journal (else it could never move a cursor).
-    #[must_use]
-    pub fn is_well_formed(&self) -> bool {
-        self.registries.len() <= super::REGISTRY_PAGE
-            && self
-                .registries
-                .keys()
-                .all(|journal| self.after.is_none_or(|after| *journal > after))
-            && self
-                .registries
-                .values()
-                .all(|registry| !registry.is_blank())
-            && (self.last || !self.registries.is_empty())
-    }
-}
-
-/// One journal's durable scalars inside a matchmaker set (#190): its GC
-/// watermark and its effective configuration. Persisted whole with the
-/// set's scalars; a journal absent from
-/// [`MatchmakerHardState::journals`] holds the defaults (nothing collected,
-/// no reconfiguration).
+/// The journal's durable scalars at a matchmaker: its GC watermark, its
+/// effective configuration, the retirement records and the chain of
+/// segments. Persisted whole with the matchmaker's other scalars; a fresh
+/// matchmaker holds the defaults (nothing collected, no reconfiguration).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalScalars {
@@ -327,8 +238,7 @@ pub struct JournalScalars {
 
 /// The small, persisted-whole durable scalars of a matchmaker set — the
 /// registry's [`crate::HardState`]: the generation state, the successor
-/// decree's acceptor record, and every journal's watermark and effective
-/// configuration (#190). `#[non_exhaustive]` and built
+/// decree's acceptor record, and the journal's scalars. `#[non_exhaustive]` and built
 /// through [`Default`] so a field can land without breaking every store.
 ///
 /// The per-ballot registrations are deliberately **not** here: they are
@@ -356,57 +266,45 @@ pub struct MatchmakerHardState {
     /// Bootstraps for proposed later generations this matchmaker is a member
     /// of, keyed by the proposed set, inactive until one is chosen.
     pub pending: Vec<PendingBootstrap>,
-    /// Every journal's scalars (#190): its GC watermark and its effective
-    /// configuration, keyed by the journal inside the set's tenant. A
-    /// journal absent here holds the defaults.
+    /// The scalars of the journal this matchmaker serves: one matchmaker,
+    /// one journal (Pierre, 2026-11-22, #1430 (tenant catalog in the cell)).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub journals: BTreeMap<JournalId, JournalScalars>,
+    pub journal: JournalScalars,
 }
 
 impl MatchmakerHardState {
-    /// `journal`'s GC watermark: [`Ballot::zero`] for a journal this set
-    /// never collected.
+    /// The journal's GC watermark: [`Ballot::zero`] when nothing was
+    /// collected.
     #[must_use]
-    pub fn gc_watermark(&self, journal: JournalId) -> Ballot {
-        self.journals
-            .get(&journal)
-            .map_or(Ballot::zero(), |scalars| scalars.gc_watermark)
+    pub fn gc_watermark(&self) -> Ballot {
+        self.journal.gc_watermark
     }
 
-    /// `journal`'s effective configuration, `None` when no reconfiguration
-    /// of it was ever registered here.
+    /// The journal's effective configuration, `None` when no
+    /// reconfiguration was ever registered here.
     #[must_use]
-    pub fn effective(&self, journal: JournalId) -> Option<&(Ballot, AcceptorConfig)> {
-        self.journals
-            .get(&journal)
-            .and_then(|scalars| scalars.effective.as_ref())
+    pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        self.journal.effective.as_ref()
     }
 
-    /// The retired node of `journal` that `config` names, if any: what
-    /// refuses a registration of `config` ([`JournalScalars::retired`]).
+    /// The retired node that `config` names, if any: what refuses a
+    /// registration of `config` ([`JournalScalars::retired`]).
     #[must_use]
-    pub fn retired_in(&self, journal: JournalId, config: &AcceptorConfig) -> Option<NodeId> {
-        self.journals.get(&journal).and_then(|scalars| {
-            scalars
-                .retired
-                .iter()
-                .find(|(n, record)| record.retired && config.contains(**n))
-                .map(|(n, _)| *n)
-        })
+    pub fn retired_in(&self, config: &AcceptorConfig) -> Option<NodeId> {
+        self.journal
+            .retired
+            .iter()
+            .find(|(n, record)| record.retired && config.contains(**n))
+            .map(|(n, _)| *n)
     }
 
-    /// Whether this matchmaker holds `node` as retired from `journal`.
+    /// Whether this matchmaker holds `node` as retired.
     #[must_use]
-    pub fn retired_in_record(&self, journal: JournalId, node: NodeId) -> bool {
-        self.journals
-            .get(&journal)
-            .and_then(|scalars| scalars.retired.get(&node))
+    pub fn retired_in_record(&self, node: NodeId) -> bool {
+        self.journal
+            .retired
+            .get(&node)
             .is_some_and(|record| record.retired)
-    }
-
-    /// `journal`'s scalars, created at their defaults on first use.
-    pub fn journal_mut(&mut self, journal: JournalId) -> &mut JournalScalars {
-        self.journals.entry(journal).or_default()
     }
 }
 

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use paros_consensus::journal::{Command, Control, JournalId};
+use paros_consensus::journal::{Command, Control};
 use paros_consensus::membership::{MatchmakerId, QuorumSystem};
 use paros_consensus::node::NodeRole;
 use paros_consensus::{Ballot, Config, Message, NodeId, Slot};
@@ -1396,7 +1396,7 @@ fn a_matchmaker_rebooted_from_its_registry_keeps_what_it_answered() {
         .expect("matchmaker 0")
         .role()
         .expect("running")
-        .registry(JournalId::UNSET)
+        .registry()
         .clone();
     assert_eq!(
         after, before,
@@ -1770,10 +1770,7 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .disk()
         .hard_state()
         .clone();
-    assert!(
-        before.gc_watermark(JournalId::UNSET) > Ballot::zero(),
-        "the floor rose"
-    );
+    assert!(before.gc_watermark() > Ballot::zero(), "the floor rose");
     world.crash_matchmaker(MatchmakerId(0)).expect("running");
     world.restart_matchmaker(MatchmakerId(0)).expect("crashed");
     let role = world
@@ -1781,10 +1778,7 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .expect("deployed")
         .role()
         .expect("running");
-    assert_eq!(
-        role.hard_state().gc_watermark(JournalId::UNSET),
-        before.gc_watermark(JournalId::UNSET)
-    );
+    assert_eq!(role.hard_state().gc_watermark(), before.gc_watermark());
     assert_eq!(role.set().generation, before.generation);
 }
 

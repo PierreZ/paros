@@ -270,11 +270,10 @@ impl MatchmakerSite {
 
     /// Raise the GC watermark, persist it, and build the ack.
     pub(super) fn gc(&mut self, request: &GcRequest) -> Option<GcAck> {
-        let outcome = self.live.as_mut()?.advance_gc_watermark(
-            request.journal,
-            request.generation,
-            request.watermark,
-        );
+        let outcome = self
+            .live
+            .as_mut()?
+            .advance_gc_watermark(request.generation, request.watermark);
         self.persist();
         let matchmaker = self.live.as_mut()?;
         let ack = matchmaker.gc_ack(request, outcome);

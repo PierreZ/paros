@@ -10,7 +10,6 @@
 //! (`specs/tla/handover-scalars/`, the `chain` checks).
 
 use super::{Matchmaker, SegmentAck, SegmentPublish};
-use crate::journal::JournalId;
 use crate::journal::chain::{Chain, merge_chain};
 
 /// What a [`SegmentPublish`] did at this matchmaker.
@@ -25,15 +24,11 @@ pub enum PublishOutcome {
 }
 
 impl Matchmaker {
-    /// `journal`'s chain of segments, as it stands (empty when no publish
-    /// reached this matchmaker).
+    /// The journal's chain of segments, as it stands (`None` when no
+    /// publish reached this matchmaker).
     #[must_use]
-    pub fn chain(&self, journal: JournalId) -> Option<&Chain> {
-        self.hard_state
-            .journals
-            .get(&journal)
-            .map(|scalars| &scalars.segments)
-            .filter(|chain| !chain.is_empty())
+    pub fn chain(&self) -> Option<&Chain> {
+        Some(&self.hard_state.journal.segments).filter(|chain| !chain.is_empty())
     }
 
     /// Merge a node's publish into the journal's chain and stage the durable
@@ -53,24 +48,22 @@ impl Matchmaker {
             return PublishOutcome::Refused;
         }
         let records = request.records();
-        let held = self.chain(request.journal).cloned().unwrap_or_default();
+        let held = self.chain().cloned().unwrap_or_default();
         let mut merged = held.clone();
         merge_chain(&mut merged, &records);
         if merged == held {
             return PublishOutcome::Unchanged;
         }
         probe!(reachable, "matchmaker: a publish grows the chain");
-        // A journal's scalars never stand without its registry window.
-        self.window(request.journal);
         let writes = self.pending_writes.len();
-        self.hard_state.journal_mut(request.journal).segments = merged;
+        self.hard_state.journal.segments = merged;
         self.stage_scalars();
         assert!(
             self.pending_writes.len() == writes + 1,
             "a publish stages exactly one write"
         );
         assert!(
-            self.chain(request.journal).is_some_and(|chain| {
+            self.chain().is_some_and(|chain| {
                 records
                     .iter()
                     .all(|(id, record)| chain.get(id).is_some_and(|h| h.end >= record.end))
@@ -95,7 +88,6 @@ impl Matchmaker {
         let generation = request.generation;
         let ack = SegmentAck {
             matchmaker: self.config.id,
-            journal: request.journal,
             generation,
             sealed: request.sealed,
             applied: !refused,
@@ -108,7 +100,7 @@ impl Matchmaker {
         assert!(
             !ack.applied
                 || self
-                    .chain(request.journal)
+                    .chain()
                     .and_then(|chain| chain.get(&request.sealed))
                     .is_some_and(|record| record.end == Some(request.end)),
             "an applied publish acks a chain that holds its end"

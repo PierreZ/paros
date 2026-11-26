@@ -76,12 +76,7 @@ impl World {
                  that union.",
                 who(id),
                 many(
-                    reconstruction
-                        .bootstrap
-                        .registries
-                        .values()
-                        .map(|r| r.history.len())
-                        .sum(),
+                    reconstruction.bootstrap.registry.history.len(),
                     "registration"
                 )
             ),
@@ -376,15 +371,12 @@ impl World {
 
     fn narrate_handover_reply(&mut self, id: MatchmakerId, reply: &ReconfigureReply) {
         let text = match reply {
-            ReconfigureReply::Stopped { registries, .. } => format!(
+            ReconfigureReply::Stopped { registry, .. } => format!(
                 "{} freezes, durably, and hands over its {}. It registers nothing for this \
                  generation ever again. It stays alive: it still votes in the decree, and it \
                  still points a late candidate at the successor.",
                 which(id),
-                many(
-                    registries.values().map(|r| r.history.len()).sum(),
-                    "registration"
-                )
+                many(registry.history.len(), "registration")
             ),
             ReconfigureReply::Bootstrapped { set, .. } => format!(
                 "{} holds the proposed generation {} on its disk, marked pending. It does not \

@@ -136,9 +136,9 @@ The rows that name `paros-coordinator`, `paros-roles` point to code at the git t
 - `consensus-sim`'s flavor `Flavor::handover` and `Action::Handover` (`cluster/handover.rs`),
   with the site "cluster: a handover chose a new matchmaker set". `Mutant::ShrinkBootstrap` is
   refused by the trace check.
-- Core probes of `matchmaker/generation.rs` and `matchmaker/reconfigurer.rs` ("handover: a frozen
-  registry spans several pages", "handover: a finish thins an even count of answerers to an odd
-  successor").
+- The core probe of `matchmaker/reconfigurer.rs` ("handover: a finish thins an even count of
+  answerers to an odd successor"). A matchmaker serves one journal (#1430 (tenant catalog in the
+  cell)), so a `Stopped` answer carries its whole registry and a `Bootstrap` the whole rebuilt one.
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
