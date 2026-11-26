@@ -12,18 +12,42 @@
 //! | 3 | No set of the latest generation that the fresh, active matchmakers report has a majority of its own members that report it, or one of them reports a configuration in force above the one `L` believes | Hold: [`HoldReason::Matchmakers`] |
 //! | 4 | The fresh members of `C` are not a Phase-1 quorum of `C` | Hold: [`HoldReason::Phase1Lost`] |
 //! | 5 | A column of `C` has no Phase-2 quorum of fresh members | No hold by itself: a lost column is a hold only when Phase 1 is lost too, which is rule 4 (Pierre, 2026-11-26) |
-//! | 6 | `L` made the GC floor `w` effective, and a fresh node outside `C` may retire at `w` once the matchmakers checked it | Order: [`Order::Retire`] |
+//! | 6 | `L` made the GC floor `w` effective, and a fresh node outside `C` that is not a spare of the caller may retire at `w` once the matchmakers checked it | Order: [`Order::Retire`] |
 //! | 7 | No member of `C` is both silent for the leader and without fresh feedback | [`Decision::Steady`] |
+//! | 8 | `L` is not settled | Hold: [`HoldReason::Unsettled`] |
+//! | 9 | A configuration other than `C` is still in force | Hold: [`HoldReason::GcNotEffective`] |
+//! | 10 | No spare is fresh, outside `C`, not retired and, on a zoned `C`, of the domain of the silent member | Hold: [`HoldReason::NoSpare`] |
+//! | 11 | No spare of rule 10 is in the pool of `L`, of each fresh member of `C` and of each fresh proxy leader, with `L` and each member of `C` in its own pool | Hold: [`HoldReason::SpareNotAdmitted`] |
+//! | 12 | For each spare of rule 11, `C'` is `C` with the spare in place of the silent member: the same size, quorum system, counts and domains | An assertion, never a hold: such a `C'` is always well formed |
+//! | 13 | For no spare of rule 12 are the fresh nodes a Phase-1 quorum of `C'` that holds a Phase-2 quorum of each column of `C'`; or `C` keeps the zone rule and no such `C'` keeps it | Hold: [`HoldReason::NewConfigurationLost`]; [`HoldReason::ZoneRuleLost`] |
+//! | 14 | Else | Order: [`Order::Reconfigure`] to the first `C'` that rule 13 keeps |
 //!
-//! Past rule 7 a member is silent on two witnesses: the leader missed it
+//! Past rule 7 a member is **silent** on two witnesses: the leader missed it
 //! for [`Policy::silent_windows`] windows in a row, and the member itself
-//! sent no fresh feedback.
+//! sent no fresh feedback. Rules 10 to 14 take the silent members from the
+//! lowest, and replace the first one that a spare can replace, with the
+//! first spare of the caller's list that rules 10 to 13 keep. When none can
+//! be replaced, the hold is the reason of the lowest one. A
+//! spare is **fresh** as a node is: the view holds a fresh feedback of it,
+//! so it runs the journal and can answer a `Prepare`.
+//!
+//! A grid places each member in a column by its position in the sorted
+//! membership. So the spare takes the place of the silent member only when
+//! its id sorts there: otherwise the members between the two places move to
+//! other columns. Rule 13 judges `C'` as it is built, so a move that
+//! loses a column or the zone rule is a hold, never an order.
+//!
+//! A spare that another controller (with an older view) started to retire
+//! may be recorded as retired at some matchmakers. The campaign of its
+//! reconfiguration is then refused and abandoned: a lost campaign, never a
+//! safety break (§4.8.1). This controller never starts such a check on a
+//! spare: rule 6 skips the spares of the caller.
 
 use std::collections::BTreeSet;
 
 use crate::contract::feedback::{LeaderFeedback, NodeFeedback, NodeInsight};
-use crate::membership::{AcceptorConfig, MatchmakerId};
-use crate::types::NodeId;
+use crate::membership::{AcceptorConfig, MatchmakerId, ShapeError, ZoneRule};
+use crate::types::{NodeId, Slot};
 
 use super::{Decision, HoldReason, Order, Policy, Spare, View};
 
@@ -150,6 +174,7 @@ fn retirable(
     policy: &Policy,
     config: &AcceptorConfig,
     leading: &LeaderFeedback,
+    spares: &[Spare],
 ) -> Option<Order> {
     let (watermark, _) = leading.gc_effective.as_ref()?;
     // One feedback is one snapshot of one leader, and a correct leader
@@ -166,6 +191,7 @@ fn retirable(
         .map(|aged| &aged.feedback)
         .find(|node| {
             !config.contains(node.id)
+                && spares.iter().all(|spare| spare.node != node.id)
                 && !node.retire_mark.checked
                 && node
                     .insights
@@ -178,6 +204,10 @@ fn retirable(
         .inspect(|order| {
             if let Order::Retire { node, .. } = order {
                 assert!(!config.contains(*node), "a retired node is outside");
+                assert!(
+                    spares.iter().all(|spare| spare.node != *node),
+                    "a spare of the caller is never retired"
+                );
             }
         })
 }
@@ -228,7 +258,6 @@ pub fn evaluate(view: &View, spares: &[Spare], policy: &Policy) -> Decision {
         policy.silent_windows > 0,
         "a member is silent for one window at least"
     );
-    let _ = spares;
     // Rule 1.
     let Some((leader, leading)) = fresh_leader(view, policy) else {
         return Decision::Hold(HoldReason::NoLeader);
@@ -252,16 +281,264 @@ pub fn evaluate(view: &View, spares: &[Spare], policy: &Policy) -> Decision {
         return Decision::Hold(HoldReason::Phase1Lost);
     }
     // Rule 6.
-    if let Some(order) = retirable(view, policy, config, leading) {
+    if let Some(order) = retirable(view, policy, config, leading, spares) {
         return Decision::Order(order);
     }
     // Rule 7.
     let silent = silent_members(config, leading, &fresh, policy);
-    let Some(&node) = silent.first() else {
+    let Some(&lowest) = silent.first() else {
         return Decision::Steady;
     };
-    assert!(config.contains(node), "a silent member is a member");
-    Decision::Hold(HoldReason::MemberSilent { node })
+    assert!(config.contains(lowest), "a silent member is a member");
+    // Rule 8.
+    if !leading.settled {
+        return Decision::Hold(HoldReason::Unsettled);
+    }
+    // Rule 9.
+    if !leading.prior.is_empty() {
+        return Decision::Hold(HoldReason::GcNotEffective);
+    }
+    // Rules 10 to 13, for each silent member in order; the hold of the
+    // lowest one when none can be replaced.
+    let mut first_hold = None;
+    for &node in &silent {
+        match replacement(view, policy, leader, &fresh, node, spares) {
+            Ok(next) => {
+                // Rule 14.
+                assert!(!next.contains(node), "the silent member leaves");
+                assert!(
+                    next != *config,
+                    "a reconfiguration changes the configuration"
+                );
+                return Decision::Order(Order::Reconfigure {
+                    leader: leader.id,
+                    ballot: leader.ballot,
+                    since: leader.since,
+                    config: next,
+                });
+            }
+            Err(reason) => {
+                first_hold.get_or_insert(reason);
+            }
+        }
+    }
+    let reason = first_hold.expect("rule 7 names a silent member");
+    assert!(
+        reason.node() == Some(lowest),
+        "the hold names the lowest silent member"
+    );
+    Decision::Hold(reason)
+}
+
+/// Rules 10 to 13 for the silent member `node`: the first `C'` that
+/// replaces it, or the reason none does.
+fn replacement(
+    view: &View,
+    policy: &Policy,
+    leader: &NodeFeedback,
+    fresh: &BTreeSet<NodeId>,
+    node: NodeId,
+    spares: &[Spare],
+) -> Result<AcceptorConfig, HoldReason> {
+    let config = &leader.acceptors;
+    // Rule 10.
+    let candidates = candidate_spares(view, policy, config, node, spares);
+    if candidates.is_empty() {
+        return Err(HoldReason::NoSpare { node });
+    }
+    // Rule 11.
+    let admitted: Vec<&Spare> = candidates
+        .into_iter()
+        .filter(|spare| admitted(view, policy, leader, node, spare.node))
+        .collect();
+    if admitted.is_empty() {
+        return Err(HoldReason::SpareNotAdmitted { node });
+    }
+    // Rule 12, and the first half of rule 13.
+    let live: Vec<AcceptorConfig> = admitted
+        .into_iter()
+        .map(|spare| {
+            let next = replaced(config, node, spare);
+            assert!(!next.contains(node), "the silent member leaves");
+            assert!(next.contains(spare.node), "the spare joins");
+            next
+        })
+        .filter(|next| is_live(next, fresh))
+        .collect();
+    if live.is_empty() {
+        return Err(HoldReason::NewConfigurationLost { node });
+    }
+    // The second half of rule 13: a `C` that breaks the zone rule asks
+    // nothing of `C'`.
+    let zones_free = config.zone_rule() != ZoneRule::Holds;
+    let next = live
+        .into_iter()
+        .find(|next| zones_free || next.zone_rule() == ZoneRule::Holds)
+        .ok_or(HoldReason::ZoneRuleLost { node })?;
+    assert!(
+        zones_free || next.zone_rule() == ZoneRule::Holds,
+        "an order keeps the zone rule of the configuration in force"
+    );
+    Ok(next)
+}
+
+/// Rule 10: the spares, in the caller's order, that can replace `silent`:
+/// fresh, outside `config`, not retired, and on a zoned `config` of the
+/// domain of `silent`.
+fn candidate_spares<'s>(
+    view: &View,
+    policy: &Policy,
+    config: &AcceptorConfig,
+    silent: NodeId,
+    spares: &'s [Spare],
+) -> Vec<&'s Spare> {
+    assert!(config.contains(silent), "the silent member is a member");
+    let domain = config.domain_of(silent);
+    assert!(
+        domain.is_some() == config.is_zoned(),
+        "a member of a zoned configuration has a domain"
+    );
+    let candidates: Vec<&Spare> = spares
+        .iter()
+        .filter(|spare| !config.contains(spare.node))
+        .filter(|spare| domain.is_none() || spare.domain.as_ref() == domain)
+        .filter(|spare| {
+            view.nodes().get(&spare.node).is_some_and(|aged| {
+                aged.age <= policy.max_age && !aged.feedback.retire_mark.checked
+            })
+        })
+        .collect();
+    assert!(
+        candidates.iter().all(|spare| spare.node != silent),
+        "the silent member is no spare of itself"
+    );
+    candidates
+}
+
+/// Rule 11: whether `spare` is in the pool of the leader, of each fresh
+/// member of the leader's configuration and of each fresh proxy leader,
+/// and whether its own pool holds the leader and each member but `silent`.
+/// A role whose pool does not hold it could not address it, and
+/// `ColocatedNode::reconfigure` refuses a configuration outside the
+/// leader's pool.
+fn admitted(
+    view: &View,
+    policy: &Policy,
+    leader: &NodeFeedback,
+    silent: NodeId,
+    spare: NodeId,
+) -> bool {
+    let config = &leader.acceptors;
+    assert!(!config.contains(spare), "a spare is outside");
+    assert!(config.contains(silent), "the silent member is a member");
+    if !leader.pool.contains(&spare) {
+        return false;
+    }
+    // A node drops a `Prepare` or an `Accept` from outside its own pool, so
+    // a spare whose pool lacks the leader or a member that stays would never
+    // vote.
+    let Some(own) = view.nodes().get(&spare) else {
+        return false;
+    };
+    if !config
+        .members()
+        .iter()
+        .filter(|id| **id != silent)
+        .chain(std::iter::once(&leader.id))
+        .all(|id| own.feedback.pool.contains(id))
+    {
+        return false;
+    }
+    let members = view
+        .nodes()
+        .values()
+        .filter(|aged| aged.age <= policy.max_age && config.contains(aged.feedback.id));
+    let proxies = view
+        .proxies()
+        .values()
+        .filter(|aged| aged.age <= policy.max_age);
+    members
+        .map(|aged| &aged.feedback.pool)
+        .chain(proxies.map(|aged| &aged.feedback.pool))
+        .all(|pool| pool.contains(&spare))
+}
+
+/// Rule 12: `config` with `spare` in place of `silent`, with the same
+/// quorum system, the same counts of proxy leaders and replicas, and on a
+/// zoned `config` the domain of the spare, which rule 10 made the domain of
+/// `silent`.
+///
+/// # Panics
+///
+/// If the new configuration cannot be built: a swap of one member keeps the
+/// size, so the quorum system still admits it, and rule 10 keeps only a
+/// spare whose domain is the well-formed domain of `silent`.
+fn replaced(config: &AcceptorConfig, silent: NodeId, spare: &Spare) -> AcceptorConfig {
+    assert!(config.contains(silent), "the silent member is a member");
+    assert!(!config.contains(spare.node), "the spare is outside");
+    let built: Result<AcceptorConfig, ShapeError> = if config.is_zoned() {
+        let domain = spare
+            .domain
+            .clone()
+            .expect("rule 10 keeps a spare with a domain on a zoned configuration");
+        assert!(
+            config.domain_of(silent) == Some(&domain),
+            "rule 10 keeps a spare of the domain of the silent member"
+        );
+        let members = config
+            .members()
+            .iter()
+            .zip(config.domains())
+            .filter(|(id, _)| **id != silent)
+            .map(|(id, domain)| (*id, domain.clone()))
+            .chain(std::iter::once((spare.node, domain)))
+            .collect();
+        AcceptorConfig::try_zoned(members, config.quorum_system())
+    } else {
+        let members = config
+            .members()
+            .iter()
+            .copied()
+            .filter(|id| *id != silent)
+            .chain(std::iter::once(spare.node))
+            .collect();
+        AcceptorConfig::try_new(members, config.quorum_system())
+    };
+    let next = built
+        .and_then(|next| next.try_with_counts(config.proxy_count(), config.replica_count()))
+        .unwrap_or_else(|e| panic!("a swap of one member keeps the shape: {e}"));
+    assert!(
+        next.members().len() == config.members().len(),
+        "a replacement keeps the size"
+    );
+    assert!(
+        next.quorum_system() == config.quorum_system(),
+        "a replacement keeps the quorum system"
+    );
+    assert!(
+        next.is_zoned() == config.is_zoned(),
+        "a replacement keeps the labels"
+    );
+    next
+}
+
+/// Rule 13: whether the `fresh` nodes are a Phase-1 quorum of `config`
+/// and hold a Phase-2 quorum of each of its columns.
+fn is_live(config: &AcceptorConfig, fresh: &BTreeSet<NodeId>) -> bool {
+    // Each column is the column of some slot below the size of the
+    // membership: a grid has at most as many columns as members.
+    let columns: BTreeSet<Option<usize>> = (0..config.members().len() as u64)
+        .map(|slot| config.column_of(Slot(slot)))
+        .collect();
+    assert!(!columns.is_empty(), "a configuration has a column");
+    assert!(
+        columns.len() <= config.members().len(),
+        "a column holds a member"
+    );
+    config.has_phase1_quorum(fresh)
+        && columns
+            .into_iter()
+            .all(|column| config.has_phase2_quorum_in(fresh, column))
 }
 
 #[cfg(test)]
