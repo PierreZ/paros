@@ -58,10 +58,10 @@
 (*           that folds the retry again (after a jump or a boot) finds    *)
 (*           it. "end": a control, the drop goes to the end of the        *)
 (*           segment, over a retry chosen between the end and the `Hold`. *)
-(*   JumpTo  "closed": a compaction or a jump of `Truncation.tla` lands a *)
-(*           floor on a closed point (`Closed`): a `TrimmedTo` carries a  *)
-(*           floor that the peer held. "any": a control, a jump lands on  *)
-(*           any point up to the floor of the peer.                      *)
+(*   JumpTo  "past": a jump of `Truncation.tla` lands a floor on a floor  *)
+(*           that an acceptor held (`FloorsHeld`): a `TrimmedTo` carries  *)
+(*           the floor of the peer. "any": a control, a jump lands on any *)
+(*           point up to the floor of the peer, which no node held.      *)
 (*   Retries the retries of a write in the log (`RetryOf` names the write  *)
 (*           that each one retries); none in the checks that do not look  *)
 (*           at them.                                                     *)
@@ -85,13 +85,15 @@ ASSUME FloorTo \in {"prefix", "any"} /\ HeldFloorNodes \subseteq Acceptors
 ASSUME HoldOf \in [HoldCmds -> Segs] /\ HoldBy \in {"decided", "tally"}
 ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 ASSUME HoldDrop \in {"keep", "end"} /\ RetryOf \in [Retries -> Commands]
-ASSUME JumpTo \in {"closed", "any"}
+ASSUME JumpTo \in {"past", "any"}
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
           held,   \* the segments marked `Held`
           rlost,  \* how many replicas lost their disk
           answers \* the retries judged: a node, a fold point, a position
+
+VARIABLE past \* acceptor: every floor that it held (a history, for `JumpTo`)
 
 seg == <<rhold, chain, held, rlost, answers>>
 hvars == <<vars, seg>>
@@ -104,6 +106,7 @@ HeldTypeOK ==
   /\ rlost \in 0..F
   /\ answers \subseteq [node : Acceptors, at : Slots, pos : 0..NS,
                         ans : {"truncated", "held", "dup"}, has : BOOLEAN]
+  /\ past \in [Acceptors -> SUBSET (0..NS)]
 
 HeldInit ==
   /\ Init
@@ -112,6 +115,7 @@ HeldInit ==
   /\ held = {}
   /\ rlost = 0
   /\ answers = {}
+  /\ past = [a \in Acceptors |-> {0}]
 
 -----------------------------------------------------------------------------
 (* The segments of the chosen log *)
@@ -300,25 +304,38 @@ Closed(f) ==
     /\ RetryAnswer(u) = "dup"
     => Min(Original(u)) >= f
 
-\* A step of `Truncation.tla` that moves a floor (a compaction, a jump)
-\* lands it on a closed point. A `TrimmedTo` carries a floor that the peer
-\* held, and each floor that a node holds is closed (`RetryKept`); the
-\* compaction of the code clamps its floor to a closed point. With
-\* `JumpTo = "any"` (a control), a jump may land on any point up to the
-\* floor of the peer.
-FloorsClosed ==
-  JumpTo = "closed" => \A a \in Acceptors : floor'[a] # floor[a] => Closed(floor'[a])
+\* A step of `Truncation.tla` that moves a floor without a compaction (a
+\* jump, or a boot that reads the durable floor) lands it on a floor that
+\* an acceptor held: a `TrimmedTo` carries the floor of the peer when it
+\* sends (`serve_catchup`, `point = first_slot()`). `TrimPoints` of
+\* `Truncation.tla` also takes any point below that floor, a point that no
+\* node held. With `JumpTo = "any"` (a control), a jump may land there.
+FloorsHeld ==
+  JumpTo = "past" /\ Retries # {} =>
+    \A a \in Acceptors :
+      floor'[a] # floor[a] =>
+        \/ floor'[a] \in UNION {past[p] : p \in Acceptors}
+        \/ \E t \in Slots : Compact(a, t)
 
 HeldNext ==
-  \/ Next /\ UNCHANGED seg /\ (HoldWhen = "held" => HoldProposedHeld') /\ FloorsClosed
+  \/ Next /\ UNCHANGED seg /\ (HoldWhen = "held" => HoldProposedHeld') /\ FloorsHeld
   \/ \E n \in Judges, t \in Slots, p \in 0..NS : Judge(n, t, p)
   \/ \E r \in Replicas : Copy(r) \/ LoseReplica(r)
   \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in HeldFloorNodes : HeldFloor(a, k)
 
-HeldSpec == HeldInit /\ [][HeldNext]_hvars
+\* Each step records the floors in the history. A check with no retry
+\* keeps no history: every floor is closed there, and the history would
+\* only add states.
+HeldStep ==
+  /\ HeldNext
+  /\ past' = IF Retries = {} THEN past ELSE [a \in Acceptors |-> past[a] \cup {floor'[a]}]
+
+HeldSpec == HeldInit /\ [][HeldStep]_<<hvars, past>>
 
 \* The liveness of `Truncation.tla`: the fairness of the last leader, whose
 \* steps keep `seg`.
+\* The fair steps do not carry `HoldProposedHeld'` or `FloorsHeld`: the
+\* liveness checks have no `Hold` and no retry, where both are true.
 HeldLiveSpec ==
   /\ HeldSpec
   /\ LET o == Owner[NB]
@@ -388,7 +405,8 @@ DupHasRecord == \A x \in answers : x.ans = "dup" => x.has
 
 \* A retry finds its write: the floor of each acceptor is closed. It holds
 \* across the steps that choose a retry, and across the drop at a `Hold`,
-\* which `FloorsClosed` does not constrain.
+\* which `FloorsHeld` does not constrain, and across the jumps: it checks
+\* that each floor stays closed as the log grows.
 RetryKept == \A a \in Acceptors : Closed(floor[a])
 
 \* A node drops a segment only on a `Hold` of a held segment (with
@@ -432,6 +450,10 @@ NoHoldDrop == ~\E k \in held, a \in Acceptors : chain[k] > 0 /\ floor[a] >= chai
 NoRetryKeep == ~\E a \in Acceptors, k \in held :
                  /\ chain[k] > 0 /\ FoldedHold(a, k) /\ floor[a] < chain[k]
                  /\ \E u \in Slots : u >= chain[k] /\ PrefixChosen(u + 1) /\ ChosenVal(u) \in Retries
+\* A node that does not drop at a `Hold` jumps to a kept floor, strictly
+\* between 0 and the end.
+NoKeepJump == ~\E a \in Acceptors \ HeldFloorNodes, k \in held :
+                0 < floor[a] /\ floor[a] < chain[k]
 \* The drop at a `Hold` keeps a part of a held segment: a floor strictly
 \* between 0 and the end.
 NoKeepMid == ~\E a \in Acceptors, k \in held : 0 < floor[a] /\ floor[a] < chain[k]

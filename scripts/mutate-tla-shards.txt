@@ -22,7 +22,7 @@ handover 5
 handover-chain 1
 handover-gc 1
 handover-scalars 2
-held-floor 4
+held-floor 12
 held-floor-hold 0
 held-floor-pass 0
 held-floor-reconfig 1

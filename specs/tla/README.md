@@ -2769,11 +2769,12 @@ check of that folder. The module adds:
   (`HoldDrop = "keep"`, the fixed point of `Replica::compaction_target`, without the retries that
   fold "held"). A retry chosen between the end of a held segment and its `Hold` holds the floor
   below the end; only a later drop whose fixed point lies above the retry lifts it, and no check
-  has such a drop. Every floor that a node holds is closed (`RetryKept`), so the steps of
-  `Truncation.tla` that move a floor land it on a closed point (`JumpTo = "closed"`): a
-  `TrimmedTo` carries a floor that the peer held, and the compaction of the code must clamp its
-  floor to a closed point. The model's `Compact` ignores the retries, and every check of this
-  folder has no `Truncate`.
+  has such a drop. `RetryKept` checks that every floor is closed: each duplicate at or above it
+  reads a write at or above it. A jump of `Truncation.tla` lands on a floor that an acceptor held
+  (`JumpTo = "past"`, with the history `past`), since a `TrimmedTo` carries the floor of the
+  peer (`serve_catchup`); `TrimPoints` also takes points below that floor, which no node held.
+  The model's `Compact` ignores the retries, and no check of this folder has a `Truncate`.
+  Every retry check has one ballot (`NB = 1`), so no recovery runs over a kept floor.
 
 | Constant | Values (first: the rule) |
 |---|---|
@@ -2788,7 +2789,7 @@ check of that folder. The module adds:
 | `Judges` | The nodes that judge retries. `{}` in the checks that have no judge. |
 | `HoldDrop` | `"keep"`: the drop at a decided `Hold` keeps every record that a duplicate above the new floor reads. `"end"`: a control, the drop goes to the end of the segment (`hold_end`). |
 | `Retries`, `RetryOf` | The retries in the log and the write that each one retries. `{}` in the checks that look at no retry. |
-| `JumpTo` | `"closed"`: a compaction or a jump of `Truncation.tla` lands a floor on a closed point (`Closed`: each duplicate at or above it reads a write at or above it), since a `TrimmedTo` carries a floor that the peer held. `"any"`: a control, a jump lands on any point up to the floor of the peer (`hold_jump`). |
+| `JumpTo` | `"past"`: a jump of `Truncation.tla` lands a floor on a floor that an acceptor held (`FloorsHeld`, with the history `past`), since a `TrimmedTo` carries the floor of the peer. `"any"`: a control, a jump lands on any point up to the floor of the peer, a point that no node held (`hold_jump`). Only the checks with retries keep the history. |
 
 The checks have one command `c1` and one `Roll` to segment 2, three acceptors and two slots, and a
 state constraint (`RollPlan`) makes a leader allocate `c1` at slot 0 and the `Roll` at slot 1; the
@@ -2826,17 +2827,18 @@ replica holds only chosen slots of its own segments).
 | `hold_decided` (in `held-floor-hold/`) | ci | pass: every invariant, with `OneAnswer` (every node gives one answer to a retry at one slot) and `DupHasRecord` (a "dup" answer has the record of the write); the decided `Hold` at slot 2, `a1` and `a2` judge (`HoldPlan`; 0.30 million states, 8 minutes with 4 workers) |
 | `hold_retry` (in `held-floor-retry/`) | ci | pass: `hold_decided` with four slots and a retry of `c1` at slot 2, between the end of segment 1 and the `Hold` at slot 3 (`RetryPlan`), and `RetryKept` (the floor of each acceptor is closed); no judge. The retry reads slot 0, so the drop keeps every slot and the floor stays at 0 (88 thousand states) |
 | `hold_keep` (in `held-floor-retry/`) | ci | pass: `c1`, `c2`, `roll2`, a retry of `c2`, `hold1` (`KeepPlan`, five slots): the drop keeps slot 1 and drops slot 0, and a laggard can jump to the kept floor. Only `a1` drops, and `a3` votes for no slot (`QuietA3`, a scenario constraint), so the check stays small (11 thousand states) |
-| `hold_inner` (in `held-floor-retry/`) | ci | pass: `c1`, a retry of `c1`, `roll2`, `hold1` (`InnerPlan`): the retry is inside segment 1, the drop goes to the end, and a jump lands only on a closed point (85 thousand states) |
+| `hold_inner` (in `held-floor-retry/`) | ci | pass: `c1`, a retry of `c1`, `roll2`, `hold1` (`InnerPlan`): the retry is inside segment 1, the drop goes to the end, and a jump lands on a floor that an acceptor held |
 | `hold_loss` (in `held-floor-hold/`) | ci | pass: `held_loss` with the decided `Hold`: `F = 1` (D8) with two replicas and one lost disk (24 thousand) |
 | `hold_held` (in `held-floor-hold/`) | long | pass: `held` with the decided `Hold`: two ballots of one leader (more than 1.3 million states in 30 minutes; not run to the end) |
-| `hold_jump` | ci | violation of `RetryKept`: `hold_inner` with `JumpTo = "any"`; `a1` drops to the end, `a2` jumps to slot 1, below the write that the retry at slot 1 reads |
-| `reach_keep_mid` | ci | violation of `NoKeepMid`: the constants of `hold_keep`; a floor stands strictly between 0 and the end |
-| `hold_end` | ci | violation of `RetryKept`: the drop at the `Hold` goes to the end of segment 1, over the retry at slot 2, which reads the record of slot 0 |
-| `reach_retry_keep` | ci | violation of `NoRetryKeep`: a node folded the `Hold` with a retry in the window, and its floor stays below the end |
+| `hold_jump` (in `held-floor-retry/`) | ci | violation of `RetryKept`: `hold_inner` with `JumpTo = "any"`; `a1` drops to the end, `a2` jumps to slot 1, below the write that the retry at slot 1 reads |
+| `reach_keep_mid` (in `held-floor-retry/`) | ci | violation of `NoKeepMid`: the constants of `hold_keep`; a floor stands strictly between 0 and the end |
+| `reach_keep_jump` (in `held-floor-retry/`) | ci | violation of `NoKeepJump`: the constants of `hold_keep`; `a2`, which does not drop, jumps to the kept floor |
+| `hold_end` (in `held-floor-retry/`) | ci | violation of `RetryKept`: the drop at the `Hold` goes to the end of segment 1, over the retry at slot 2, which reads the record of slot 0 |
+| `reach_retry_keep` (in `held-floor-retry/`) | ci | violation of `NoRetryKeep`: a node folded the `Hold` with a retry in the window, and its floor stays below the end |
 | `reach_hold_laggard` | long | violation of `NoLaggardWin`: `reach_laggard_win` with the decided `Hold` (5.9 million states, 14 minutes with 4 workers) |
-| `hold_tally` | ci | violation of `OneAnswer`: the floor from the tally of each node; `a1` answers "held" where `a2` answers "dup" |
-| `hold_any` | ci | violation of `RecordKept`: a `Hold` of a segment that is not held drops a record that no replica holds |
-| `reach_hold_judge`, `reach_hold_drop` | ci | violation: a node answers "held"; a node folds a `Hold` and drops the held segment |
+| `hold_tally` (in `held-floor-hold/`) | ci | violation of `OneAnswer`: the floor from the tally of each node; `a1` answers "held" where `a2` answers "dup" |
+| `hold_any` (in `held-floor-hold/`) | ci | violation of `RecordKept`: a `Hold` of a segment that is not held drops a record that no replica holds |
+| `reach_hold_judge`, `reach_hold_drop` (in `held-floor-hold/`) | ci | violation: a node answers "held"; a node folds a `Hold` and drops the held segment |
 | `held_laggard` | long | `Ends` (`HeldLiveSpec`) with the constants of `reach_laggard_win`: the laggard is refused by the held floor, jumps and wins |
 | `two_leaders` | long | pass: `held` with the owners `a1`, `a2` and `a3`, and `a1` and `a2` catch up |
 | `one_leader_f1` | long | pass: `held` with `F = 1`, two replicas and a lost disk |

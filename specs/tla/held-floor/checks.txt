@@ -15,17 +15,9 @@ held_f             violation  ci
 held_log           violation  ci
 floor_any          violation  ci
 floor_prefix       pass       ci
-hold_tally         violation  ci
-hold_any           violation  ci
-reach_hold_judge   violation  ci
-reach_hold_drop    violation  ci
 held_laggard       pass       long  60
 two_leaders        pass       long  60
 one_leader_f1      pass       long  60
 full               pass       long  60
 three_slots        pass       long  60
-hold_end           violation  ci
-reach_retry_keep   violation  ci
 reach_hold_laggard violation  long  60
-hold_jump          violation  ci
-reach_keep_mid     violation  ci
