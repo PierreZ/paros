@@ -3,6 +3,7 @@
 //! its static configuration. Every deployment speaks it.
 
 pub mod config;
+pub mod feedback;
 pub mod hard_state;
 pub mod limits;
 pub mod mem_storage;
@@ -11,6 +12,10 @@ pub mod storage;
 pub mod write;
 
 pub use config::Config;
+pub use feedback::{
+    LeaderFeedback, MatchmakerFeedback, NodeFeedback, NodeInsight, ProxyFeedback, ProxyInsight,
+    ReplicaFeedback,
+};
 pub use hard_state::HardState;
 pub use limits::Limits;
 pub use mem_storage::MemStorage;

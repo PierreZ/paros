@@ -1373,6 +1373,18 @@ impl ReplicaNode {
         self.counters
     }
 
+    /// What this replica reports about itself, as plain data
+    /// ([`crate::contract::feedback`]; #1564 (journal controller, version 1)).
+    #[must_use]
+    pub fn feedback(&self) -> crate::contract::feedback::ReplicaFeedback {
+        crate::contract::feedback::ReplicaFeedback {
+            leader: self.leader(),
+            has_read_basis: self.read_basis().is_some(),
+            learned: self.counters.learned,
+            catch_up_requests: self.counters.catch_up_requests,
+        }
+    }
+
     /// The bytes of the records this replica holds in memory, from its
     /// compaction floor up: the sum of their [`Weigh::weight`]. A driver
     /// reads it to bound the memory of the retained log, as on a node

@@ -4,6 +4,7 @@
 //! reads (#1564 (journal controller, version 1)).
 
 use super::*;
+use crate::contract::feedback::NodeInsight;
 
 /// Tick the leader `nodes[0]` once and deliver its beats to every node but
 /// `cut`, so the window closes held without the ack of `cut`.
@@ -122,4 +123,71 @@ fn ticks_count_each_tick_and_only_a_settled_leader_is_settled() {
     make_leader(&mut nodes, 0);
     assert!(nodes[0].is_settled(), "an empty recovery leaves it settled");
     assert!(!nodes[1].is_settled());
+}
+
+#[test]
+fn the_feedback_of_a_leader_reports_its_leadership_and_its_silent_member() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(2);
+    for _ in 0..4 {
+        beat_without(&mut nodes, Some(NodeId(2)));
+    }
+    let feedback = nodes[0].feedback();
+    assert!(
+        !feedback.heard,
+        "a node with no matchmakers keeps its bootstrap belief"
+    );
+    assert_eq!(feedback.id, NodeId(0));
+    assert_eq!(feedback.leader, Some(NodeId(0)));
+    assert_eq!(feedback.ballot, nodes[0].ballot());
+    assert_eq!(feedback.acceptors, *nodes[0].acceptors());
+    assert_eq!(feedback.since, nodes[0].acceptors_since());
+    assert_eq!(feedback.tick, nodes[0].ticks());
+    assert_eq!(
+        feedback.quorum_windows_held,
+        nodes[0].counters().quorum_windows_held
+    );
+    assert_eq!(feedback.retained_bytes, nodes[0].retained_bytes());
+    let leading = feedback
+        .leading
+        .as_ref()
+        .expect("a leader reports it leads");
+    assert!(leading.settled);
+    assert!(leading.prior.is_empty(), "plain Multi-Paxos has no prior");
+    assert!(
+        leading.gc_effective.is_none(),
+        "plain Multi-Paxos collects nothing"
+    );
+    assert_eq!(leading.missed, nodes[0].missed_windows());
+    let windows = leading.missed[0].1;
+    assert!(
+        feedback.insights.contains(&NodeInsight::MemberSilent {
+            node: NodeId(2),
+            windows,
+        }),
+        "the leader concludes node 2 is silent: {:?}",
+        feedback.insights
+    );
+    assert!(!feedback.insights.contains(&NodeInsight::Outside));
+    // A follower reports no leadership, and the leader it follows.
+    let follower = nodes[1].feedback();
+    assert!(follower.leading.is_none());
+    assert_eq!(follower.leader, Some(NodeId(0)));
+    assert!(follower.insights.is_empty(), "{:?}", follower.insights);
+}
+
+#[test]
+fn the_feedback_of_a_deposed_leader_reports_the_lost_window() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(3);
+    for _ in 0..10 {
+        nodes[0].tick();
+        let _ = drain(&mut nodes[0]);
+    }
+    let feedback = nodes[0].feedback();
+    assert!(feedback.leading.is_none());
+    assert_eq!(feedback.quorum_lost_step_downs, 1);
+    assert!(feedback.insights.contains(&NodeInsight::QuorumWindowLost));
 }

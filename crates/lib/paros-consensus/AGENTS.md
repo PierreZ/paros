@@ -46,6 +46,7 @@ Foundations:
   - `storage.rs` → `Storage`, the read-only recovery port.
   - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples); `rot` damages a record into a faulty entry, and a later write at its slot heals it.
   - `hard_state.rs` → `HardState` (two scalars, `#[non_exhaustive]`); `config.rs` → `Config` (`proxy_count`, `replica_count`, `reply_owner`).
+  - `feedback.rs` → `NodeFeedback`, `LeaderFeedback`, `NodeInsight`, `ProxyFeedback`, `ProxyInsight`, `MatchmakerFeedback`, `ReplicaFeedback` → what each deployment reports about itself as plain data, through its `feedback()` (#1564 (journal controller, version 1)): metrics that the role counts and insights that it concluded. Not part of a `Ready`; reading it changes nothing.
   - `limits.rs` → `Limits` (the page sizes, the read window and the proxy leader's retention a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`, `CATCHUP_BATCH`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 

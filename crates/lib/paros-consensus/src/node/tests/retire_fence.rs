@@ -7,6 +7,7 @@
 //! later campaign wins.
 
 use super::*;
+use crate::contract::feedback::NodeInsight;
 use crate::contract::write::{RetireMark, WriteOp};
 use crate::matchmaker::{MatchPurpose, MatchRefusal};
 use crate::membership::QuorumSystem;
@@ -133,6 +134,12 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     // The check asks the matchmakers. Each one names the stale belief at
     // 13, and the fence rises to it, durably.
     assert!(n3.retirement_unchecked(w));
+    let insights = n3.feedback().insights;
+    assert!(insights.contains(&NodeInsight::Outside), "{insights:?}");
+    assert!(
+        insights.contains(&NodeInsight::RetirementUnchecked { floor: w }),
+        "{insights:?}"
+    );
     assert!(n3.check_retirement_heard(), "the check opens a probe");
     let requests = drain_match_requests(&mut n3);
     assert!(requests.iter().all(|(_, r)| r.purpose.is_probe()));
@@ -167,6 +174,12 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     assert_eq!(n3.registration_fence(), stale, "nothing names it any more");
     assert!(n3.may_retire(later));
     assert!(n3.may_retire_heard());
+    let insights = n3.feedback().insights;
+    assert!(
+        insights.contains(&NodeInsight::MayRetire { floor: later }),
+        "{insights:?}"
+    );
+    assert!(!insights.contains(&NodeInsight::RetirementUnchecked { floor: later }));
 }
 
 /// Gap B. Node 1 registers its belief at 13, which names it, and meets the

@@ -553,8 +553,18 @@ impl ColocatedNode {
     /// The ticks this node has taken ([`ColocatedNode::tick`]): its own
     /// logical clock. A holder of feedback ages a report in its own ticks,
     /// so no clock crosses two processes.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ticks(&self) -> u64 {
+        // The election clock only counts ticks, and starts again at zero.
+        assert!(
+            self.election_elapsed <= self.tick_count,
+            "the election clock never runs ahead of the node's ticks"
+        );
         self.tick_count
     }
 
@@ -604,6 +614,10 @@ impl ColocatedNode {
             .iter()
             .map(|(id, count)| (*id, *count))
             .collect();
+        assert!(
+            missed.len() <= self.belief.config().members().len(),
+            "a leader counts missed windows of its members only"
+        );
         for (id, count) in &missed {
             assert!(*count > 0, "a missed count is at least one window");
             assert!(*id != self.config.id, "a leader never misses its own ack");
@@ -629,6 +643,10 @@ impl ColocatedNode {
             assert!(
                 self.role != NodeRole::Leader,
                 "a node that leads has not lost its window"
+            );
+            assert!(
+                self.counters.quorum_lost_step_downs > 0,
+                "a lost window is a counted step-down"
             );
         }
         self.quorum_window_lost

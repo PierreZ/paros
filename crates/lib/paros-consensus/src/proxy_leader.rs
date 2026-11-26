@@ -134,6 +134,7 @@
 //! `Commit` a proxy emits is backed by a Phase-2 quorum of **durable**
 //! accepts at one ballot.
 
+mod feedback;
 pub mod ready;
 
 use std::collections::BTreeMap;
