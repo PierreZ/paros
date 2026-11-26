@@ -3,6 +3,7 @@
 //! applied, a read it answered) and shares no code with the core it
 //! judges (#909 (oracles that do not judge)).
 
+pub mod healed;
 pub mod journal;
 pub mod ledger;
 pub mod memory;

@@ -323,3 +323,22 @@ fn reads_on_lagging_pools() {
         LAGGING_SEEDS,
     );
 }
+
+/// The journal controller (#1564 (journal controller, version 1)): a member
+/// stops for good when the faults stop, and two controllers, one with a view
+/// that lags, replace it. Goal 2 judges each seed at the end
+/// (`Cluster::healed`).
+#[test]
+fn healing() {
+    walk(
+        Flavor::healing(),
+        &[
+            reach::CONTROL_RECONFIGURE,
+            reach::CONTROL_STARTED,
+            reach::CONTROL_STALE_ORDER,
+            reach::CONTROL_RETIRE,
+            reach::CONTROL_RETIRED,
+            reach::GC_ACKED,
+        ],
+    );
+}

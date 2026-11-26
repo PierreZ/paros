@@ -109,6 +109,12 @@ Test only: `publish = false`, never a dependency of another crate.
     `paros_consensus::journal::state`; it uses the core's types as data only.
   - `reads.rs` → `Reads`: `READ_SEES_WRITES`, a leaderless read sees every write that completed
     before it started.
+  - `healed.rs` → goal 2 for the journal controller (#1564 (journal controller, version 1)):
+    `HEALED` (after the settle rounds, each member of the configuration in force runs and the
+    fresh controller is `Steady`, or it holds `NoSpare` for a member that is down while no
+    spare runs, counted by the driver), `NO_FALSE_SILENCE` (once the faults stop, an order of
+    the fresh controller removes no member that runs). It never calls the rules of
+    `paros_consensus::controller`.
 - `cluster.rs` + `cluster/` → `Cluster`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cluster/flavor.rs`) says what the cluster holds (acceptors, quorum system, proxy
   leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
@@ -137,7 +143,17 @@ Test only: `publish = false`, never a dependency of another crate.
     floor names), `Action::Rejoin` (a retired node boots again, or a running non-member
     rejoins), `Action::Admit` (a node, a replica or a proxy leader admits a late spare to its pool; until
     then a configuration that names the spare is outside that party's pool, and a proxy ignores
-    a delegation that carries it; `reconfigured-compartments` has a late spare for this).
+    a delegation that carries it; `reconfigured-compartments` has a late spare for this). The
+    pools of the nodes and replicas catch up at the calm, and those of the proxy leaders at the
+    settle rounds, so a reconfiguration onto the late spare in the quiet phase meets a proxy
+    that ignores its delegations.
+  - `cluster/control.rs` → the two journal controllers of a flavor with `controllers` (#1564):
+    each tick the driver gathers the `feedback()` of every party that runs (in the chaos, one
+    feedback in four is lost), the fresh controller observes each round at once and the stale
+    one `LAG` rounds late, both decide with `controller::evaluate` under `POLICY`, and the driver
+    carries each order with `reconfigure`, `check_retirement` and `may_retire`. At the calm, one
+    member of the configuration in force stops for good (`stop_for_good`). The last node of the
+    pool is never offered as a spare, so rule 6 retires it once a floor is effective.
   - `cluster/handover.rs` → `Action::Handover`: each node's driver holds a
     `MatchmakerReconfigurer`, starts a handover to a target from the matchmaker pool, finishes
     a frozen generation it meets, adopts a chosen set, and republishes it to a matchmaker left
@@ -201,11 +217,13 @@ Test only: `publish = false`, never a dependency of another crate.
   have values to propose again, until the next roll, which goes to such a leader first; it must
   reach a valid `Roll`, two `Roll` rounds open at once, a trim jump past a `Roll`, and a `Roll`
   admitted while the recovery still holds values to propose again, and a publish of a segment's
-  end that a majority of the matchmakers holds). 60 seeds each in CI; `lagging-reads`
+  end that a majority of the matchmakers holds), and the journal controller (`healing`: matchmakers,
+  three spares and two controllers; a member stops for good at the calm, and the controllers
+  replace it and retire the spare that leaves; the operator makes no move). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
-- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::EarlyPublish`: a leader's driver
+- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::DropOrders`: the driver drops every order of the controllers, caught by `HEALED`; `Mutant::LateView`: the fresh controller sees the stale rounds, caught by `NO_FALSE_SILENCE`; `Mutant::EarlyPublish`: a leader's driver
   publishes the end of the tail segment as the leader admits a `Roll`, caught by `CHAIN_TRUE`;
   `Mutant::RouteFromTail`: a leader's driver routes each `Commit` to the replicas of the tail
   segment of the leader's fold, caught by `ROUTE_TRUE`;
@@ -245,7 +263,7 @@ Test only: `publish = false`, never a dependency of another crate.
   `node/ProxyLeaderTrace` (control: a proxy that keeps its rounds across a crash,
   `Mutant::KeepProxyRounds`); the handoff against `node/LeaderHandoffTrace` (control: a handoff
   that rewinds the frontier, `Mutant::RewindHandoff`); every flavor without matchmakers against
-  `node/MultiPaxosTrace`; the matchmakers against `node/MatchmakerTrace`; the lagging reads
+  `node/MultiPaxosTrace`; the matchmakers and the `healing` flavor against `node/MatchmakerTrace`; the lagging reads
   against `node/ReadsTrace` (controls: a read fence below the promise, a hidden watermark); the
   `compaction` flavor against `node/TruncationTrace` (control: a compaction past the fold);
   every compartment against `node/CompartmentsTrace` (control: a replica read with no quorum);
@@ -263,7 +281,8 @@ Test only: `publish = false`, never a dependency of another crate.
   learn, and the `Learn` of `node/` asks for it, so `LearnRecordsHeld`
   holds at every state of a trace; the control drops the record of a learn and TLC refuses the
   learn (`tlc_refuses_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
-  job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
+  job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, a healing walk 120 (the order to
+  replace a member follows the calm, and 250 quiet steps keep too many events), the others
   10: a retirement needs a leader that stands while its GC floor becomes effective, and a
   delegated round under a new configuration needs a leadership of it that settles. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has

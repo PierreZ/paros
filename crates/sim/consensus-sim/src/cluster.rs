@@ -21,6 +21,7 @@
 //! reaches a disk, each message that leaves a party, each slot a party
 //! applies, each read it answers. They share no code with the core.
 
+mod control;
 mod faults;
 mod flavor;
 mod handover;
@@ -65,6 +66,16 @@ pub use trace::{ClusterEvent, Cmd, OwnAnswer, Rule, Spec};
 /// The coverage sites of the cluster. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
 pub mod reach {
+    /// The fresh controller ordered a reconfiguration.
+    pub const CONTROL_RECONFIGURE: &str = "cluster: the fresh controller ordered a reconfiguration";
+    /// The fresh controller ordered a retirement.
+    pub const CONTROL_RETIRE: &str = "cluster: the fresh controller ordered a retirement";
+    /// The stale controller gave an order.
+    pub const CONTROL_STALE_ORDER: &str = "cluster: the stale controller gave an order";
+    /// A leader started a reconfiguration that a controller ordered.
+    pub const CONTROL_STARTED: &str = "cluster: a leader started a controller's reconfiguration";
+    /// A node retired on a controller's order.
+    pub const CONTROL_RETIRED: &str = "cluster: a node retired on a controller's order";
     /// A party applied a valid `Roll`: the log entered a new segment.
     pub const ROLLED: &str = "cluster: a party applied a valid Roll";
     /// A leader admitted a `Roll` while an earlier one was still open: no
@@ -341,6 +352,9 @@ pub struct Cluster {
     /// The FNV-1a fold of every batch a party of the core handed this
     /// driver ([`Cluster::ready_digest`]).
     ready_digest: u64,
+    /// The journal controllers of a flavor with
+    /// [`controllers`](Flavor::controllers).
+    control: control::Controllers,
 }
 
 impl Model for Cluster {
@@ -555,8 +569,12 @@ impl Model for Cluster {
     fn restart(&mut self, party: &Party, cx: &mut Cx<'_, Self>) {
         match *party {
             Party::Node(id) => {
-                // A retired node stays down until the operator books it.
-                if self.node(id).live.is_none() && !self.retired.contains(&id) {
+                // A retired node stays down until the operator books it,
+                // and a node that stopped for good stays down.
+                if self.node(id).live.is_none()
+                    && !self.retired.contains(&id)
+                    && self.control.dead != Some(id)
+                {
                     self.boot_node(id, true, cx);
                 }
             }
@@ -590,23 +608,23 @@ impl Model for Cluster {
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
         self.calmed = true;
         // A pool that lags the deployment's registry is a fault of the
-        // walk, and it stops with the other faults. The contract of the
-        // core: the driver admits to the pool (`extend_pool`) every node
-        // that its registry, a replicated log, registers, so each fold
-        // reaches every registration once the network is calm. Until then
-        // a node refuses a late node's messages: that costs liveness, never
-        // safety, and the walk judges safety through the whole lag. A
-        // lagging-reader walk keeps the pools lagging through the quiet
-        // phase, where leaders stand and reconfigure, and admits them when
-        // the settle rounds start (`Cluster::tick_all`).
-        // The pools of the proxy leaders lag through the quiet phase too,
-        // and catch up when the settle rounds start: with the faults
-        // stopped, a leader that stands reconfigures onto a late node, and
-        // its delegations meet a proxy that ignores them until a take-back
-        // or a move runs the round (`ProxyLeader::admits`).
+        // walk. The contract of the core: the driver admits to the pool
+        // (`extend_pool`) every node that its registry, a replicated log,
+        // registers, so each fold reaches every registration once the
+        // network is calm. Until then a party refuses a late node's
+        // messages: that costs liveness, never safety, and the walk judges
+        // safety through the whole lag. The node and replica pools catch up
+        // here, with the other faults. The pools of the proxy leaders lag
+        // through the quiet phase, where leaders stand and reconfigure onto
+        // a late node, so a delegation meets a proxy that ignores it until a
+        // take-back or a move runs the round (`ProxyLeader::admits`). A
+        // lagging-reader walk keeps every pool lagging through the quiet
+        // phase. Every pool catches up when the settle rounds start
+        // (`Cluster::tick_all`).
         if self.flavor.steer != Steer::LaggingReader {
             self.admit_nodes_and_replicas();
         }
+        self.stop_for_good(cx);
         // Some proxies stay dead for the tail: a leader's take-back is the
         // only way their rounds decide.
         for site in &mut self.proxies {
@@ -668,7 +686,11 @@ impl Model for Cluster {
                 return Err(format!("proxy {} holds open rounds", site.id.0));
             }
         }
-        for site in self.nodes.iter().filter(|s| !self.retired.contains(&s.id)) {
+        for site in self
+            .nodes
+            .iter()
+            .filter(|s| !self.retired.contains(&s.id) && self.control.dead != Some(s.id))
+        {
             let reached = site.live.as_ref().map(|n| n.replica().first_unchosen());
             if reached.is_none_or(|r| r < frontier) {
                 return Err(format!(
@@ -686,7 +708,7 @@ impl Model for Cluster {
                 ));
             }
         }
-        Ok(())
+        self.healed()
     }
 
     fn describe(&self) -> String {
@@ -782,6 +804,7 @@ impl Cluster {
             admitted: BTreeMap::new(),
             proxy_admitted: BTreeMap::new(),
             ready_digest: paros_consensus::types::FNV_OFFSET,
+            control: control::Controllers::default(),
             pool,
             flavor,
         };
@@ -1743,6 +1766,7 @@ impl Cluster {
                 self.drain_replica(id, cx);
             }
         }
+        self.control(cx);
     }
 
     /// A leader the client reaches, and the journal as that leader folds it.
