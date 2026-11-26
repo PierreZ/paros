@@ -11,10 +11,13 @@ use crate::node::RollResult;
 
 /// One routed `Commit`: the node that sent it, its segment, its replicas
 /// and its slot.
-type Routed = (NodeId, SegmentId, ReplicaSet, Slot);
+pub(super) type Routed = (NodeId, SegmentId, ReplicaSet, Slot);
 
 /// Drain `n`, keeping the `Commit`s it routed to the replicas of a segment.
-fn drain_routed(n: &mut ColocatedNode, routed: &mut Vec<Routed>) -> Vec<(NodeId, Message)> {
+pub(super) fn drain_routed(
+    n: &mut ColocatedNode,
+    routed: &mut Vec<Routed>,
+) -> Vec<(NodeId, Message)> {
     let me = n.config().id;
     let (queue, mut more) = drain_with(n, |ready| {
         ready
@@ -37,7 +40,10 @@ fn drain_routed(n: &mut ColocatedNode, routed: &mut Vec<Routed>) -> Vec<(NodeId,
 
 /// Deliver `queue` among `nodes` until it is empty, keeping every routed
 /// `Commit`; a message to an id outside the nodes (a replica) is dropped.
-fn deliver_routed(nodes: &mut [ColocatedNode], mut queue: Vec<(NodeId, Message)>) -> Vec<Routed> {
+pub(super) fn deliver_routed(
+    nodes: &mut [ColocatedNode],
+    mut queue: Vec<(NodeId, Message)>,
+) -> Vec<Routed> {
     let mut routed = Vec::new();
     while let Some((to, msg)) = queue.pop() {
         let Some(n) = nodes.iter_mut().find(|n| n.config().id == to) else {
@@ -80,7 +86,7 @@ fn the_leader_routes_each_walked_slot_to_the_replicas_of_its_segment() {
 /// Three nodes of a deployment with `matchmakers` matchmakers, whose
 /// configuration names `first` as the replicas of the first segment, and
 /// their matchmakers.
-fn cluster_with_first(
+pub(super) fn cluster_with_first(
     first: Option<&ReplicaSet>,
     matchmakers: u64,
 ) -> ([ColocatedNode; 3], Vec<Matchmaker>) {
@@ -97,7 +103,7 @@ fn cluster_with_first(
 
 /// Campaign `nodes[idx]` through the matchmakers, and hand back the
 /// messages its matchmaking released (its `Prepare`s).
-fn matchmade(
+pub(super) fn matchmade(
     nodes: &mut [ColocatedNode],
     idx: usize,
     mms: &mut [Matchmaker],

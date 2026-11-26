@@ -521,7 +521,10 @@ fn a_sealed_replica_reports_its_whole_segment_on_each_beat() {
         segment: SegmentId(0),
         end: Slot(2),
     };
-    assert_eq!(reports(&mut replica, &mut disk), std::slice::from_ref(&held));
+    assert_eq!(
+        reports(&mut replica, &mut disk),
+        std::slice::from_ref(&held)
+    );
     assert_eq!(reports(&mut replica, &mut disk), [held], "on each beat");
 }
 

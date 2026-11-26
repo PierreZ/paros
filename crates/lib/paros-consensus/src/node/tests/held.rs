@@ -21,7 +21,11 @@ fn held(from: u64, segment: u64, end: Slot) -> Message {
 #[test]
 fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published() {
     let (mut nodes, mut mms, _) = rolled(Some(ReplicaSet::new([NodeId(3), NodeId(4)])));
-    let RollResult::Accepted { slot, .. } = nodes[0].roll(None) else {
+    // The second `Roll` names other replicas, for segment 2: the replicas
+    // of segment 1 are the ones its own `Roll` named.
+    let RollResult::Accepted { slot, .. } =
+        nodes[0].roll(Some(ReplicaSet::new([NodeId(5), NodeId(6)])))
+    else {
         panic!("the leader admits a second roll");
     };
     for _ in 0..3 {
@@ -35,6 +39,8 @@ fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published
     // Reports that do not count: a node that is no replica of the
     // segment, another end, and a segment that names no replicas.
     nodes[0].step(held(1, 1, end));
+    nodes[0].step(held(5, 1, end));
+    nodes[0].step(held(6, 1, end));
     nodes[0].step(held(3, 1, slot));
     nodes[0].step(held(3, 0, Slot(1)));
     nodes[0].step(held(3, 7, end));
@@ -64,6 +70,47 @@ fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published
     assert_eq!(nodes[1].held_segments().count(), 0);
     nodes[1].step(held(4, 1, end));
     assert_eq!(nodes[1].held_segments().collect::<Vec<_>>(), [SegmentId(1)]);
+}
+
+/// The replicas of the first segment come from the configuration
+/// (`Config::segment_replicas`).
+#[test]
+fn the_first_segment_is_held_by_the_replicas_of_the_configuration() {
+    let first = ReplicaSet::new([NodeId(8), NodeId(9)]);
+    let (mut nodes, mut mms) = super::route::cluster_with_first(Some(&first), 3);
+    let q = super::route::matchmade(&mut nodes, 0, &mut mms);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    let RollResult::Accepted { slot, .. } = nodes[0].roll(None) else {
+        panic!("the leader admits a roll");
+    };
+    // The leader routes the slots of the first segment to its replicas,
+    // which are not nodes of this test.
+    let mut routed = Vec::new();
+    for _ in 0..3 {
+        for i in 0..nodes.len() {
+            let q = super::route::drain_routed(&mut nodes[i], &mut routed);
+            routed.extend(super::route::deliver_routed(&mut nodes, q));
+        }
+    }
+    assert!(
+        routed
+            .iter()
+            .any(|(_, segment, set, _)| *segment == SegmentId::FIRST && *set == first)
+    );
+    nodes[0].resend_segment_publishes();
+    let requests = drain_publishes(&mut nodes[0]);
+    for ack in publish(&mut mms, &requests) {
+        let _ = nodes[0].on_segment_ack(&ack);
+    }
+    let end = Slot(slot.0 + 1);
+    nodes[0].step(held(8, 0, end));
+    assert_eq!(nodes[0].held_segments().count(), 0);
+    nodes[0].step(held(9, 0, end));
+    assert_eq!(
+        nodes[0].held_segments().collect::<Vec<_>>(),
+        [SegmentId::FIRST]
+    );
 }
 
 /// A plain deployment ignores every report.

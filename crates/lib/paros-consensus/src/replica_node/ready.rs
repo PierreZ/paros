@@ -36,8 +36,8 @@ impl ReplicaReady<'_> {
         writes
     }
 
-    /// Outbound messages: catch-up requests and quorum-read `PreRead`s,
-    /// each to one node.
+    /// Outbound messages: catch-up requests, quorum-read `PreRead`s and
+    /// the `SegmentHeld` reports of a sealed replica, each to one node.
     ///
     /// # Panics
     ///

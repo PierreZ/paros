@@ -203,7 +203,17 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   (`collector::HeldTally`, wired in `node/held.rs`); `AcceptorConfig::is_held_by` is the one
   comparison with `F`; the end is in the chain once the node's own publish completed
   (`Publisher::is_published`). `ColocatedNode::held_segments` lists the segments marked `Held`.
-  Not built yet: the `Hold` that a leader proposes for them, and its drop. **Open** (step 6):
+  Not built yet: the `Hold` that a leader proposes for them, and its drop. **Open** (step 6,
+  before the `Hold` drops a record): a report counts until the segment is held, and the tally
+  never forgets its sender. The model bounds the lost replica disks over the whole run
+  (`rlost < F`), so there a sender that reported once still holds the segment, or one of the
+  `F` losses is spent on it. If `F` bounds the losses at one time, a sender that lost its disk
+  after it reported still counts. The `Hold` step decides between fresh reports only and a
+  check in `held-floor/` that counts every reporter. **Open** (step 6): `F` is the `f` of the
+  configuration that the node believes in force when it judges, not of the configurations
+  that chose the slots of the segment; for a grid, `tolerated_failures` is the availability `f`
+  (the minimum over the two phases). The `Hold` step decides which configuration counts.
+  **Open** (step 6):
   a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
   holds every slot that a decided `Truncate` did not release, but the rule that counts it needs
   a model with replicas that compact (`held-floor/` has none).

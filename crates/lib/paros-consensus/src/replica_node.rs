@@ -25,7 +25,9 @@
 //!   and is ignored.
 //! - **Out:** `CatchUpRequest`, to the beat's sender when its watermark is
 //!   ahead of this replica's prefix, and on the driver's tick while a faulty
-//!   record is open; `PreRead`, to a row of acceptors, for a quorum read. A
+//!   record is open; `PreRead`, to a row of acceptors, for a quorum read;
+//!   `SegmentHeld`, to the beat's sender, once sealed with its whole
+//!   segment on a matchmaker deployment (R7 of §4.7). A
 //!   replica serves no peer: healing it is the acceptors' job, as healing a
 //!   lagging acceptor is.
 //! - **Reads:** the journal read ([`ReplicaNode::read_log`], #185) is served
@@ -632,8 +634,7 @@ impl ReplicaNode {
 
     /// Answer a beat with [`Message::SegmentHeld`] when this replica holds
     /// the whole segment it keeps (R7): it is sealed, and its floor is the
-    /// start of the segment, so it dropped none of its slots, and no
-    /// record of it is damaged. A replica that compacted inside its
+    /// start of the segment, so it dropped none of its slots. A replica that compacted inside its
     /// segment or jumped into it reports nothing (**Open**: such a replica
     /// holds every slot that a decided `Truncate` did not release, and the
     /// rule that counts it needs its model). The records are durable before the report leaves:
@@ -646,10 +647,16 @@ impl ReplicaNode {
             return;
         };
         let base = self.replica.journal_base().segment;
-        // A damaged record is a slot it does not hold until it heals.
-        if self.floor != base.start || !self.faulty.is_empty() {
+        if self.floor != base.start {
             return;
         }
+        // A damaged record is a hole in the fold, which then stops below
+        // the `Roll`; one past the end is dropped at the seal. So a sealed
+        // replica holds no damaged record of its segment.
+        assert!(
+            self.faulty.is_empty(),
+            "a sealed replica holds no damaged record"
+        );
         assert!(base.start < end, "a sealed segment holds its `Roll`");
         assert!(
             self.replica.segment_bound() == Some(base.id),

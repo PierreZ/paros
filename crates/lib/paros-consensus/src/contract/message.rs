@@ -622,10 +622,11 @@ pub enum Message {
     /// Sent only by a sealed `ReplicaNode` whose floor is the start of the
     /// segment it keeps, so it holds the whole segment; the driver persists
     /// the records before it sends the message, as for every reply. The
-    /// leader counts the senders that the fold names as replicas of the
-    /// segment ([`crate::collector::HeldTally`]); more than `F` of them,
-    /// with the end in the chain, make the segment `Held`. A matchmaker
-    /// deployment only: a plain node ignores it.
+    /// node that gets it (a leader, since only a leader beats) counts the
+    /// senders that its fold names as replicas of the segment
+    /// ([`crate::collector::HeldTally`]); more than `F` of them, with the
+    /// end in the chain, make the segment `Held`. A matchmaker deployment
+    /// only: a plain node ignores it.
     SegmentHeld {
         /// The replica that holds the segment.
         from: NodeId,
