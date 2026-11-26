@@ -91,6 +91,10 @@ impl Held {
         self.replica.compaction_target(&self.log)
     }
 
+    pub(super) fn compaction_floor(&self, up_to: Slot) -> Option<Slot> {
+        self.replica.compaction_floor(&self.log, up_to)
+    }
+
     pub(super) fn assert_compacted(&mut self) {
         self.replica.assert_compacted(&self.log);
     }

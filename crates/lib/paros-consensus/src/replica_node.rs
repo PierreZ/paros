@@ -1027,10 +1027,9 @@ impl ReplicaNode {
     /// `compact` does: clamped to what the journal fold lets go, sealing the
     /// state the dropped slots folded to.
     fn compact(&mut self, up_to: Slot) {
-        let Some(target) = self.replica.compaction_target(&self.records) else {
+        let Some(highest_drop) = self.replica.compaction_floor(&self.records, up_to) else {
             return;
         };
-        let highest_drop = up_to.min(target);
         let first = Slot(highest_drop.0 + 1).max(self.floor);
         if first <= self.floor {
             return;

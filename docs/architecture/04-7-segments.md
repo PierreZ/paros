@@ -189,10 +189,10 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   (`Replica::compaction_target`, without the retries that fold "held"): the floor stays below
   the end, and only a later drop whose fixed point lies above the retry lifts it. A
   `TrimmedTo` carries the floor of its sender, so it lands a laggard on a floor that some node
-  held. **Open** (step 6 code): `ColocatedNode::compact(up_to)` clamps its floor to
-  `up_to.min(target)`, and a clamp below the fixed point can leave a retry above the floor whose
-  write is below it (the class of #204). The code step makes the clamp land on a fixed point of
-  the same walk.
+  held. A caller of `ColocatedNode::compact(up_to)` can ask for less than the target, so the
+  clamp walks down from `up_to` to a fixed point of the same walk (`Replica::compaction_floor`),
+  and `Replica::truncate` asserts that its floor is one: a floor between a retry and the record
+  that it reads would fold the retry `Refused` on a refold (the class of #204).
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
