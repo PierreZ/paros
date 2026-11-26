@@ -43,6 +43,7 @@ is the **subject** of a card, never its only source.
 6. Reconfiguration: matchmaking, reconfiguration as a round change, GC, matchmaker generations.
 7. Storage: corrupted storage recovery, truncation and the trim point, boot safety.
 8. On the log: the writer fence, [segments in the core](concepts/segments.md).
+9. Operations: the [journal controller](concepts/journal-controller.md).
 
 `concepts.md` marks each card verified or planned, group by group. A card that waits for a source
 says so in its row.
