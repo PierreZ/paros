@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/` and `held-floor-retry/`, which extend `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/` and `held-floor-released/`, which extend `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2809,6 +2809,7 @@ check of that folder. The module adds:
 | `F` | The replicas that may lose their disk. |
 | `HeldFloorNodes` | The acceptors that raise their floor at `Held`. |
 | `HoldBy` | `"decided"`: the floor moves on a decided `Hold`. `"tally"`: the floor moves on the tally of the node, a control for the judge (`hold_tally`), and the rule of the other checks of this folder, which have no judge. |
+| `Skip` | `"none"`: only the replicas of a segment make it `Held` (every check but those of `held-floor-released/`). `"released"`: a segment whose writes all lie below `first_seq` is marked `Held` too, with no replica, so a segment that no replica keeps does not stop the held prefix. `"norep"`: a control, a segment with no replicas is marked `Held` at once (`norep`). |
 | `HoldWhen` | `"held"`: a leader proposes a `Hold` only for a segment that its tally marked held. `"any"`: a control, for any segment. |
 | `HoldOf` | The segment that each `Hold` value names. |
 | `Judges` | The nodes that judge retries. `{}` in the checks that have no judge. |
@@ -2876,12 +2877,17 @@ replica holds only chosen slots of its own segments).
 | `one_leader_f1` | long | pass: `held` with `F = 1`, two replicas and a lost disk |
 | `full` | long | pass: three owners, `F = 1`, two replicas and a lost disk |
 | `three_slots` | long | pass: a command in segment 2 (`CmdPlan3`), so slot 2 is above the held floor while it rises |
+| `released` (in `held-floor-released/`) | ci | pass: every invariant, `Skip = "released"`, no segment has replicas; `c1`, a `Truncate` of it, then `roll2` (`CutPlan`, `Cut1`): segment 1 is marked `Held` once it ends with every write released, and the floor rises to its end (0.17 million distinct states) |
+| `released_uncut` (in `held-floor-released/`) | ci | pass: `released` with no `Truncate` (`RollPlan`): segment 1 is never released, so it is never marked `Held` and no floor drops `c1` |
+| `norep` (in `held-floor-released/`) | ci | violation of `RecordKept`: `released_uncut` with `Skip = "norep"`; segment 1 has no replicas and is marked `Held`, and the floor drops `c1`, which nothing keeps |
+| `reach_released` (in `held-floor-released/`) | ci | violation of `NoHeldDrop`: the constants of `released`; every acceptor drops segment 1, which no replica holds |
 
 `held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
 `held_loss`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of
 the decided `Hold` and of the retries (`held-floor-hold/` also the `Compact` of a `Truncate` over
-a retry, `held-floor-retry/` the tally that never forgets a report), so that each of the four jobs stays inside its minutes.
-The guard mutation of `HeldFloor.tla` runs the checks of the four folders.
+a retry, `held-floor-retry/` the tally that never forgets a report), and `held-floor-released/`
+links them too and runs the released segment (`Skip`), so that each of the five jobs stays inside
+its minutes. The guard mutation of `HeldFloor.tla` runs the checks of the five folders.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
 replicas that a `Roll` names (the sets are fixed, D4), the heal and the trim of a sealed segment

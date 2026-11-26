@@ -46,6 +46,8 @@ Roll23 == [v \in {roll2, roll3} |-> IF v = roll2 THEN 2 ELSE 3]
 \* of segment 1 (D4: a `Roll` with no replicas keeps the same machines).
 Reps12 == [k \in Segs |-> IF k = 1 THEN {r1, r2} ELSE {}]
 Reps1 == [k \in Segs |-> IF k < Cardinality(Segs) THEN {r1} ELSE {}]
+\* No segment has replicas: only a release marks one `Held`.
+RepsNone == [k \in Segs |-> {}]
 \* Segment 1 has three replicas, so a replica that reported it and lost its
 \* disk can still be counted while two others hold it.
 Reps123 == [k \in Segs |-> IF k = 1 THEN {r1, r2, r3} ELSE {}]
@@ -58,6 +60,9 @@ Reps123 == [k \in Segs |-> IF k = 1 THEN {r1, r2, r3} ELSE {}]
 Planned(script) == \A m \in msgs : m.type = "2a" /\ m.val \in Proposals => m.val \in script[m.slot]
 RollPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE Rolls])
 RollPlan3 == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN {roll2} ELSE {roll3}])
+\* `CutPlan`: the command, a `Truncate` of it, then `roll2`: segment 1 is
+\* released once it ends.
+CutPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Cuts ELSE Rolls])
 \* `HoldPlan`: the command, `roll2`, then `hold1`.
 HoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls ELSE HoldCmds])
 \* `RetryPlan`: the command, `roll2`, a retry of the command in segment 2,

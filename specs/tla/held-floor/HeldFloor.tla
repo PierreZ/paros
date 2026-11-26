@@ -78,6 +78,14 @@
 (*   Losses  "total": at most `F` lost disks over the run. "at_once": any  *)
 (*           number, with at most `F` replicas down at one time.           *)
 (*           "at_once_f1": a control, `F + 1` down at one time.            *)
+(*   Skip    "none": only the replicas of a segment make it `Held`.       *)
+(*           "released": a segment whose writes all lie below `first_seq` *)
+(*           is marked `Held` too, with no replica: a `Truncate` released *)
+(*           its records, so a segment that no replica keeps (no replicas,*)
+(*           or a leader that forgot it at a restart) does not stop the   *)
+(*           held prefix for good. "norep": a control, a segment with no  *)
+(*           replicas is marked `Held` at once, and the floor drops a     *)
+(*           record that nothing keeps.                                   *)
 (*   CompactTo "kept": the `Compact` of a `Truncate` lands on a closed     *)
 (*           floor, the fixed point of `Replica::compaction_floor`: a      *)
 (*           retry above the floor that folds as a duplicate keeps the     *)
@@ -88,7 +96,7 @@ EXTENDS Truncation
 
 CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes,
           HoldOf, HoldBy, HoldWhen, Judges, HoldDrop, RetryOf, JumpTo, Count, Losses,
-          CompactTo
+          CompactTo, Skip
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
@@ -101,7 +109,7 @@ ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 ASSUME HoldDrop \in {"keep", "end"} /\ RetryOf \in [Retries -> Commands]
 ASSUME JumpTo \in {"past", "any"}
 ASSUME Count \in {"now", "ever"} /\ Losses \in {"total", "at_once", "at_once_f1"}
-ASSUME CompactTo \in {"kept", "any"}
+ASSUME CompactTo \in {"kept", "any"} /\ Skip \in {"none", "released", "norep"}
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -163,6 +171,15 @@ End(k) == IF HeldEnd = "chain" THEN chain[k] ELSE LogEnd(k)
 \* The slots of segment k, which ends at e > 0.
 SegSlots(k, e) == {s \in 0..(e - 1) : SegAt(s) = k}
 
+\* The record of the chosen slot s is released: it is below `first_seq`.
+Released(s) == \E t \in Slots : t >= s /\ (\A u \in 0..t : IsChosen(u)) /\ FirstSeq(t) > Pos(s)
+
+\* Every write of segment k is released: the segment ends in the chosen
+\* log, and a `Truncate` raised `first_seq` past each of its writes.
+SegReleased(k) ==
+  /\ LogEnd(k) > 0
+  /\ \A s \in SegSlots(k, LogEnd(k)) : ChosenVal(s) \in Commands => Released(s)
+
 -----------------------------------------------------------------------------
 (* The steps of segments *)
 
@@ -212,10 +229,13 @@ HoldsLog(k) == IF LogEnd(k) = 0 THEN {} ELSE {r \in RepOf[k] : SegSlots(k, LogEn
 Counted(k) == IF Count = "now" THEN HoldsAll(k) ELSE reported[k]
 
 \* The leader marks segment k `Held`: enough of its replicas hold every slot
-\* of it, up to its end.
+\* of it, up to its end; or (with `Skip = "released"`) every write of it is
+\* released, whatever its replicas hold.
 MarkHeld(k) ==
   /\ End(k) > 0
-  /\ Cardinality(Counted(k)) >= Need
+  /\ \/ Cardinality(Counted(k)) >= Need
+     \/ Skip = "released" /\ SegReleased(k)
+     \/ Skip = "norep" /\ RepOf[k] = {}
   /\ held' = held \cup {k}
   /\ UNCHANGED <<vars, rhold, chain, rlost, answers>>
 
@@ -429,9 +449,6 @@ InHeld(s) ==
 FloorTruncatedOrHeld ==
   \A a \in Acceptors, s \in Slots :
     s < floor[a] => (\E t \in Slots, v \in Truncations : t >= s /\ Chosen(t, v)) \/ InHeld(s)
-
-\* The record of the chosen slot s is released: it is below `first_seq`.
-Released(s) == \E t \in Slots : t >= s /\ (\A u \in 0..t : IsChosen(u)) /\ FirstSeq(t) > Pos(s)
 
 \* A floor keeps the records: a record below a floor is below `first_seq`,
 \* or in a held segment. (`FloorReleased` of `Truncation.tla`, with the

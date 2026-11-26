@@ -1,0 +1,12 @@
+# A released segment counts as held (R7 of docs/architecture/04-7-segments.md):
+# a segment whose writes all lie below `first_seq` is marked `Held` with no
+# replica, so it does not stop the held prefix. HeldFloor.tla of held-floor/
+# (a link), with `Skip`.
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+released        pass       ci
+released_uncut  pass       ci
+norep           violation  ci
+reach_released  violation  ci
