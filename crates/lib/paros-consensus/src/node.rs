@@ -909,7 +909,8 @@ impl ColocatedNode {
     /// clamped to what the journal fold lets go
     /// ([`Replica::compaction_floor`]: every slot below the one holding the
     /// journal's first retained record, never an undecided or unfolded one,
-    /// and never a record that a retained retry above the new floor reads),
+    /// and never a record that a retained retry at or above the new floor
+    /// reads),
     /// which makes the call safe to over-request and idempotent (a floor never
     /// moves backward). When the floor would not rise it is a no-op that emits
     /// no [`WriteOp::Truncate`].

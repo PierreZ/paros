@@ -851,9 +851,10 @@ impl Replica {
 
     /// The highest slot at or below `up_to` that a decided truncation lets
     /// this replica drop: the [`Replica::compaction_target`] when `up_to`
-    /// reaches it, else the floor that keeps every record a retained retry
-    /// at or above it reads, from `up_to + 1` down. `None` when nothing may
-    /// go.
+    /// reaches it, else the slot below the floor that keeps every record a
+    /// retained retry at or above it reads, walked down from the floor
+    /// `up_to + 1`. Never above what may drop. A result below the current
+    /// floor means that nothing new goes. `None` when nothing may go.
     ///
     /// A caller that asks for less than the target must not take `up_to`
     /// as it is: a retry above `up_to` may read a record at or below it,
