@@ -168,6 +168,7 @@ pub mod batcher;
 pub mod belief;
 pub mod collector;
 pub mod contract;
+pub mod controller;
 pub mod decree;
 pub mod journal;
 pub mod matchmaker;
