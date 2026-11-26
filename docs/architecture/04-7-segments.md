@@ -104,7 +104,7 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 | D6 | The journal of design A (its crates, walks, docs and TLA+ models) is removed. A journal above the core is for a later plan (D7) | Pierre, 2026-11-24, changed 2026-11-25; done in PR #1538 (remove the journal of design A), at the tag `journal-design-a` |
 | D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes after this work. `paros-host` is removed | Pierre, 2026-11-24; changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 | D8 | `F` of R7 is the `f` of the acceptor configuration: a held segment survives as many lost replicas as the acceptors of its slots did | Taken on 2026-11-26 under the rule "always take the recommendation" (Pierre, 2026-11-22), while Pierre was away; the decision card stays open, and Pierre may overrule it |
-| D9 | The floor at `Held` is a decided command, `Command::Hold`, as `Truncate` is: the leader proposes it once its tally saw the segment held, and every node raises its floor where its fold applies it. A retry of a write below the end of a held segment is answered "held" by every node at the same slot. A floor that each node took from its own tally made two nodes judge one retry two ways (`held-floor/`, the control `hold_tally`) | Taken on 2026-11-26 under the rule "always take the recommendation" (Pierre, 2026-11-22), while Pierre was away; the decision card stays open, and Pierre may overrule it |
+| D9 | The floor at `Held` is a decided command, `Command::Hold`, as `Truncate` is: the leader proposes it once its tally saw the segment held, and every node raises its floor where its fold applies it. From the slot of the `Hold`, every node answers a retry of a write below the end of the segment "held". The drop keeps every record that a retry chosen before the `Hold` reads, as the compaction of a `Truncate` does. A floor that each node took from its own tally made two nodes judge one retry two ways (`held-floor/`, the control `hold_tally`) | Taken on 2026-11-26 under the rule "always take the recommendation" (Pierre, 2026-11-22), while Pierre was away; the decision card stays open, and Pierre may overrule it |
 
 #### 4.7.3 Rules
 
@@ -181,9 +181,12 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   passes an end that is not published. The floor moves on a decided `Hold` (D9): the leader
   proposes it only for a segment that its tally saw held, and each node drops the records below
   the end where its fold applies the `Hold`. From that slot, a retry of a write below the end
-  is answered "held" on every node, and the reader asks the replicas of the segment. The drop
-  keeps every record that a retry chosen above the floor reads, as the compaction of a
-  `Truncate` does (`Replica::compaction_target`).
+  is answered "held" on every node, and the reader asks the replicas of the segment. A retry
+  chosen before the `Hold` folds as a duplicate, and a node that folds it again (after a jump or
+  a boot) reads the record of its write. So the drop keeps every record that a retry chosen
+  above the new floor reads, as the compaction of a `Truncate` does
+  (`Replica::compaction_target`): the floor stays below the end until a later `Hold` passes
+  that retry.
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment

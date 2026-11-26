@@ -27,7 +27,7 @@ handover-chain 7.5
 handover-gc 1.5
 handover-scalars 2
 held-floor 18
-held-floor-hold 10
+held-floor-hold 13
 held-floor-pass 18
 held-floor-reconfig 8
 journal-ids 6

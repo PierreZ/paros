@@ -3,8 +3,9 @@
 EXTENDS HeldFloor, TLC
 
 \* The acceptor and replica names, the truncation value and the `Roll`
-\* value: model values that the configurations set.
-CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1
+\* value, the `Hold` value and the retry value: model values that the
+\* configurations set.
+CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1, w1
 
 \* A majority of the acceptors, the same for every slot.
 Majorities == {Q \in SUBSET Acceptors : 2 * Cardinality(Q) > Cardinality(Acceptors)}
@@ -23,6 +24,9 @@ NoCut == [c \in {} |-> 0]
 \* No `Hold` value, or one, `hold1`, the floor at the held segment 1.
 NoHold == [h \in {} |-> 1]
 Hold1 == [h \in {hold1} |-> 1]
+
+\* Each retry, `w1`, retries the one command of the check.
+RetryOne == [v \in Retries |-> CHOOSE c \in Commands : TRUE]
 
 \* One `Roll`, `roll2`, which opens segment 2; or two, `roll2` and `roll3`.
 Roll2 == [v \in {roll2} |-> 2]
@@ -43,6 +47,10 @@ RollPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE Rolls])
 RollPlan3 == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN {roll2} ELSE {roll3}])
 \* `HoldPlan`: the command, `roll2`, then `hold1`.
 HoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls ELSE HoldCmds])
+\* `RetryPlan`: the command, `roll2`, a retry of the command in segment 2,
+\* then `hold1`.
+RetryPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls
+                                       ELSE IF s = 2 THEN Retries ELSE HoldCmds])
 CmdPlan3 == Planned([s \in Slots |-> IF s = 1 THEN Rolls ELSE Commands])
 
 \* The two replicas of segment 1 are alike.

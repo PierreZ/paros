@@ -2120,6 +2120,7 @@ each of them:
 | `Faults`, `RotNodes` | How many faulty entries a boot can find in the run, and on which nodes. |
 | `Rolls` | The `Roll` values of segments: control values that weigh nothing. `{}` in every check of this folder; `held-floor/` gives them a meaning. |
 | `HoldCmds` | The `Hold` values of segments (D9 of §4.7): control values that weigh nothing. `{}` in every check of this folder; `held-floor/` gives them a meaning. |
+| `Retries` | The retries of a write in the log: values that take no position. `{}` in every check of this folder; `held-floor/` gives them a meaning. |
 | `Learners` | The nodes that catch up and jump. |
 | `C3`, `R2` | A second reconfiguration: ballots from `R2` up use `C3`, whose new members start empty too. `R2 = NB + 1`: no second reconfiguration. |
 
@@ -2757,9 +2758,17 @@ check of that folder. The module adds:
 - **The judge of a retry** (`Judges`): a node whose fold reached slot `t`, with slot `t + 1` not
   chosen yet, judges a retry of the write at a position `p`: "truncated" below `first_seq`,
   "held" below the end of a segment whose `Hold` the fold applied, and else "dup", which needs
-  the record of the write. A retry already chosen below a floor is a write of the log; the drop
-  keeps the record that it reads (`Replica::compaction_target`), and the model has no such
-  retry.
+  the record of the write. With `HoldBy = "decided"` the answer is a function of the chosen
+  log, so `OneAnswer` holds by the fold: its content is the control `hold_tally`, and the
+  content of the pass is `DupHasRecord`.
+- **The retries in the log** (`Retries`, `RetryOf`): a retry is a value of a slot that takes no
+  position. Its fold (`RetryAnswer`) is "refused" with no write to retry, "truncated", "held"
+  after a `Hold` of the segment of its write, and else "dup", which reads the record of the
+  write. A node folds again every slot at or above its floor (after a jump or a boot), so the
+  drop at a `Hold` keeps every record that a duplicate above the new floor reads
+  (`HoldDrop = "keep"`, the fixed point of `Replica::compaction_target`). A retry chosen between
+  the end of a held segment and its `Hold` holds the floor below the end until a later `Hold`
+  passes it.
 
 | Constant | Values (first: the rule) |
 |---|---|
@@ -2772,12 +2781,19 @@ check of that folder. The module adds:
 | `HoldWhen` | `"held"`: a leader proposes a `Hold` only for a segment that its tally marked held. `"any"`: a control, for any segment. |
 | `HoldOf` | The segment that each `Hold` value names. |
 | `Judges` | The nodes that judge retries. `{}` in the checks that have no judge. |
+| `HoldDrop` | `"keep"`: the drop at a decided `Hold` keeps every record that a duplicate above the new floor reads. `"end"`: a control, the drop goes to the end of the segment (`hold_end`). |
+| `Retries`, `RetryOf` | The retries in the log and the write that each one retries. `{}` in the checks that look at no retry. |
 
 The checks have one command `c1` and one `Roll` to segment 2, three acceptors and two slots, and a
 state constraint (`RollPlan`) makes a leader allocate `c1` at slot 0 and the `Roll` at slot 1; the
 gap fill still writes a `Noop` at a hole. The last segment has no replica, so it is never held.
 `floor_prefix` and `floor_any` have three slots and two `Roll`s (`RollPlan3`): `c1`, `roll2`,
 then `roll3`, so segment 2 is the slot of `roll3`, and it keeps the replica of segment 1 (D4).
+
+`FoldedHeld` (each `Hold` that a node folded names a held segment, and every segment before it
+is held) says that each drop of the decided floor is a drop that the tally floor may also take.
+The `Hold` takes a slot of its own, so the tally checks do not explore the decided runs: the
+`hold_*` passes do, with `FoldedHeld`.
 
 The invariants are those of `truncation/`, with two that know the held segments:
 `FloorTruncatedOrHeld` (each slot below a floor is at or below a chosen truncation, or in a held
@@ -2802,6 +2818,12 @@ replica holds only chosen slots of its own segments).
 | `held_loss` (in `held-floor-pass/`) | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
 | `floor_prefix` | ci | pass: every invariant, two `Roll`s, one ballot (0.21 million) |
 | `hold_decided` (in `held-floor-hold/`) | ci | pass: every invariant, with `OneAnswer` (every node gives one answer to a retry at one slot) and `DupHasRecord` (a "dup" answer has the record of the write); the decided `Hold` at slot 2, `a1` and `a2` judge (`HoldPlan`; 0.30 million states, 8 minutes with 4 workers) |
+| `hold_retry` (in `held-floor-hold/`) | ci | pass: `hold_decided` with four slots and a retry of `c1` at slot 2, between the end of segment 1 and the `Hold` at slot 3 (`RetryPlan`), and `RetryKept` (each duplicate at or above a floor reads a write at or above it); no judge (88 thousand states) |
+| `hold_loss` (in `held-floor-hold/`) | ci | pass: `held_loss` with the decided `Hold`: `F = 1` (D8) with two replicas and one lost disk (24 thousand) |
+| `hold_held` (in `held-floor-hold/`) | long | pass: `held` with the decided `Hold`: two ballots of one leader (more than 1.3 million states in 30 minutes; not run to the end) |
+| `hold_end` | ci | violation of `RetryKept`: the drop at the `Hold` goes to the end of segment 1, over the retry at slot 2, which reads the record of slot 0 |
+| `reach_retry_keep` | ci | violation of `NoRetryKeep`: a node folded the `Hold` with a retry in the window, and its floor stays below the end |
+| `reach_hold_laggard` | long | violation of `NoLaggardWin`: `reach_laggard_win` with the decided `Hold` (5.9 million states, 14 minutes with 4 workers) |
 | `hold_tally` | ci | violation of `OneAnswer`: the floor from the tally of each node; `a1` answers "held" where `a2` answers "dup" |
 | `hold_any` | ci | violation of `RecordKept`: a `Hold` of a segment that is not held drops a record that no replica holds |
 | `reach_hold_judge`, `reach_hold_drop` | ci | violation: a node answers "held"; a node folds a `Hold` and drops the held segment |

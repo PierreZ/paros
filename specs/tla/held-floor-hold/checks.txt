@@ -1,4 +1,4 @@
-# The pass of the decided Hold (D9 of docs/architecture/04-7-segments.md) on
+# The passes of the decided Hold (D9 of docs/architecture/04-7-segments.md) on
 # the model of held-floor/ (HeldFloor.tla and MC.tla are linked here, so that
 # the held-floor job stays inside its minutes).
 # One TLC run for each line: <configuration> <expected result> <where it runs>
@@ -7,3 +7,6 @@
 #   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
 #             long       only `scripts/check-tla.sh --all` runs it
 hold_decided       pass       ci
+hold_retry         pass       ci
+hold_loss          pass       ci
+hold_held          pass       long  60
