@@ -21,6 +21,11 @@ OwnOne == [b \in Ballots |-> a1]
 \* No truncation value.
 NoCut == [c \in {} |-> 0]
 
+\* Each truncation value releases the first write (`up_to` = 1), or the
+\* first two (`up_to` = 2).
+Cut1 == [c \in Cuts |-> 1]
+Cut2 == [c \in Cuts |-> 2]
+
 \* No `Hold` value, or one, `hold1`, the floor at the held segment 1.
 NoHold == [h \in {} |-> 1]
 Hold1 == [h \in {hold1} |-> 1]
@@ -29,7 +34,10 @@ Hold1 == [h \in {hold1} |-> 1]
 \* second command.
 RetryOne == [v \in Retries |-> CHOOSE c \in Commands : TRUE]
 RetryC2 == [v \in Retries |-> c2]
+RetryC1 == [v \in Retries |-> c1]
 
+\* No `Roll`: one segment.
+NoRoll == [v \in {} |-> 2]
 \* One `Roll`, `roll2`, which opens segment 2; or two, `roll2` and `roll3`.
 Roll2 == [v \in {roll2} |-> 2]
 Roll23 == [v \in {roll2, roll3} |-> IF v = roll2 THEN 2 ELSE 3]
@@ -65,6 +73,12 @@ InnerPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN 
 KeepPlan == Planned([s \in Slots |-> IF s = 0 THEN {c1} ELSE IF s = 1 THEN {c2}
                                       ELSE IF s = 2 THEN Rolls ELSE IF s = 3 THEN Retries
                                       ELSE HoldCmds])
+\* `CompactPlan`: `c1`, `c2`, a retry, then a `Truncate`. With a retry of
+\* `c2` and `Cut2`, the target is slot 4 and floor 2 is not closed: a
+\* `Compact` stopped below the target lands on slot 1 or 3. With a retry
+\* of `c1` and `Cut1`, the target, slot 1, is not closed itself.
+CompactPlan == Planned([s \in Slots |-> IF s = 0 THEN {c1} ELSE IF s = 1 THEN {c2}
+                                         ELSE IF s = 2 THEN Retries ELSE Cuts])
 \* `a3` votes for no slot: the votes of `a1` and `a2` choose every slot.
 \* A scenario constraint that keeps the five slots of `KeepPlan` small.
 QuietA3 == ~\E m \in msgs : m.type = "2b" /\ m.acc = a3
