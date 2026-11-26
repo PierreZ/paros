@@ -10,3 +10,9 @@ released        pass       ci
 released_uncut  pass       ci
 norep           violation  ci
 reach_released  violation  ci
+released_part   pass       ci
+released_prefix pass       ci
+reach_skip      violation  ci
+skip_none       pass       ci
+released_hold   pass       ci
+reach_released_hold violation  ci

@@ -63,6 +63,20 @@ RollPlan3 == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN 
 \* `CutPlan`: the command, a `Truncate` of it, then `roll2`: segment 1 is
 \* released once it ends.
 CutPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Cuts ELSE Rolls])
+\* `CutPartPlan`: `c1`, `c2`, a `Truncate` of the first, then `roll2`: one
+\* write of segment 1 stays above `first_seq`.
+CutPartPlan == Planned([s \in Slots |-> IF s = 0 THEN {c1} ELSE IF s = 1 THEN {c2}
+                                         ELSE IF s = 2 THEN Cuts ELSE Rolls])
+\* `CutPrefixPlan`: `c1`, a `Truncate` of it, `roll2`, `c2` in segment 2,
+\* then `roll3`: segment 1 is released, and segment 2 needs its replica.
+CutPrefixPlan == Planned([s \in Slots |-> IF s = 0 THEN {c1} ELSE IF s = 1 THEN Cuts
+                                           ELSE IF s = 2 THEN {roll2} ELSE IF s = 3 THEN {c2}
+                                           ELSE {roll3}])
+\* `CutHoldPlan`: the command, a `Truncate` of it, `roll2`, then `hold1`.
+CutHoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Cuts
+                                         ELSE IF s = 2 THEN Rolls ELSE HoldCmds])
+\* Only segment 2 has a replica, `r1`.
+Reps2 == [k \in Segs |-> IF k = 2 THEN {r1} ELSE {}]
 \* `HoldPlan`: the command, `roll2`, then `hold1`.
 HoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls ELSE HoldCmds])
 \* `RetryPlan`: the command, `roll2`, a retry of the command in segment 2,

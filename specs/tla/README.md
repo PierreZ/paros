@@ -2881,6 +2881,12 @@ replica holds only chosen slots of its own segments).
 | `released_uncut` (in `held-floor-released/`) | ci | pass: `released` with no `Truncate` (`RollPlan`): segment 1 is never released, so it is never marked `Held` and no floor drops `c1` |
 | `norep` (in `held-floor-released/`) | ci | violation of `RecordKept`: `released_uncut` with `Skip = "norep"`; segment 1 has no replicas and is marked `Held`, and the floor drops `c1`, which nothing keeps |
 | `reach_released` (in `held-floor-released/`) | ci | violation of `NoHeldDrop`: the constants of `released`; every acceptor drops segment 1, which no replica holds |
+| `released_part` (in `held-floor-released/`) | ci | pass: `c1`, `c2`, a `Truncate` of the first, then `roll2` (`CutPartPlan`): `c2` stays above `first_seq`, so segment 1 is not released and no floor drops `c2` (a rule that asks for one released write, not every one, loses `c2`) |
+| `released_prefix` (in `held-floor-released/`) | ci | pass: two `Roll`s, segment 1 with no replicas and released, segment 2 with one replica (`Reps2`, `F = 0`), and `c2` in segment 2 (`CutPrefixPlan`); only `a1` drops and learns, and `a3` votes for no slot |
+| `reach_skip` (in `held-floor-released/`) | ci | violation of `NoSkipDrop`: the constants of `released_prefix`; a floor passes the end of the held segment 2, over the released segment 1, which has no replicas |
+| `skip_none` (in `held-floor-released/`) | ci | pass of `NoSkipDrop`: `reach_skip` with `Skip = "none"`; segment 1 is never held, so no floor passes segment 2: without the rule, the segment with no replicas stops the held prefix |
+| `released_hold` (in `held-floor-released/`) | ci | pass: the decided `Hold` (`HoldBy = "decided"`) of the released segment 1 with no replicas, and `a1` judges (`CutHoldPlan`), with `OneAnswer`, `DupHasRecord` and `FoldedHeld` |
+| `reach_released_hold` (in `held-floor-released/`) | ci | violation of `NoHoldDrop`: the constants of `released_hold`; `a1` folds the `Hold` and drops the released segment |
 
 `held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
 `held_loss`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of

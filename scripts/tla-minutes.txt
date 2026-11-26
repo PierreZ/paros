@@ -29,8 +29,8 @@ handover-scalars 2
 held-floor 21
 held-floor-hold 17
 held-floor-pass 18
-held-floor-released 3
 held-floor-reconfig 8
+held-floor-released 6
 held-floor-retry 22
 journal-ids 6
 leader-handoff 15

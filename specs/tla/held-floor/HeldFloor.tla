@@ -175,7 +175,9 @@ SegSlots(k, e) == {s \in 0..(e - 1) : SegAt(s) = k}
 Released(s) == \E t \in Slots : t >= s /\ (\A u \in 0..t : IsChosen(u)) /\ FirstSeq(t) > Pos(s)
 
 \* Every write of segment k is released: the segment ends in the chosen
-\* log, and a `Truncate` raised `first_seq` past each of its writes.
+\* log (`LogEnd`, so that `HeldEnd = "log"` reads it too), and a
+\* `Truncate` raised `first_seq` past each of its writes. A segment with no
+\* write (only `Roll`s, `Noop`s or cuts) is released as soon as it ends.
 SegReleased(k) ==
   /\ LogEnd(k) > 0
   /\ \A s \in SegSlots(k, LogEnd(k)) : ChosenVal(s) \in Commands => Released(s)
@@ -522,6 +524,10 @@ NoLaggardWin == ~\E k \in held :
                   /\ floor[Owner[NB]] >= chain[k]
 \* A leader wins Phase 1 from at or above a held floor.
 NoWinAboveHeld == ~\E b \in Ballots, k \in held : phase[b] = "p2" /\ chain[k] > 0 /\ from[b] >= chain[k]
+\* A floor passes the end of a held segment that comes after a segment with
+\* no replicas: the released segment does not stop the held prefix.
+NoSkipDrop == ~\E k \in held, j \in Segs, a \in Acceptors :
+                j < k /\ RepOf[j] = {} /\ chain[k] > 0 /\ floor[a] >= chain[k]
 \* A retry is answered held.
 \* A node folded a `Hold` and dropped the held segment: its floor is at the
 \* end (with `HoldBy = "decided"`, only a learner folds a `Hold`).
