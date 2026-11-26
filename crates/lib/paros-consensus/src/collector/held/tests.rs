@@ -1,5 +1,5 @@
 use super::{HeldTally, SealedSegment};
-use crate::journal::{ReplicaSet, SegmentId};
+use crate::journal::{ReplicaSet, SegmentId, Seq};
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{NodeId, Slot};
 
@@ -13,6 +13,7 @@ fn sealed(replicas: Option<&[u64]>) -> SealedSegment {
     SealedSegment {
         start: Slot(0),
         end: Slot(5),
+        next_seq: Seq(0),
         replicas: replicas.map(|r| ReplicaSet::new(r.iter().copied().map(NodeId))),
     }
 }
@@ -70,4 +71,19 @@ fn two_notes_of_one_segment_that_differ_are_a_bug() {
     let mut tally = HeldTally::default();
     tally.note(SEG, sealed(Some(&[7, 8, 9])));
     tally.note(SEG, sealed(Some(&[7, 8])));
+}
+
+#[test]
+fn a_report_of_a_held_segment_changes_nothing() {
+    let mut tally = HeldTally::default();
+    tally.note(SEG, sealed(Some(&[7, 8, 9])));
+    assert!(tally.report(NodeId(7), SEG, Slot(5)));
+    assert!(tally.report(NodeId(8), SEG, Slot(5)));
+    assert!(tally.judge(SEG, &three(), true));
+    assert!(
+        !tally.report(NodeId(9), SEG, Slot(5)),
+        "a held segment counts no report"
+    );
+    assert_eq!(tally.reporters(SEG), 0, "a held segment keeps no report");
+    assert!(tally.is_held(SEG));
 }

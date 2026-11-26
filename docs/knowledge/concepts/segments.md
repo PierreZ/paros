@@ -146,8 +146,11 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   holds its whole segment answers each beat with `Message::SegmentHeld`, and the leader marks
   the segment `Held` (`collector::HeldTally`, `ColocatedNode::held_segments`) once more than
   `F` replicas of the fold reported it (`AcceptorConfig::is_held_by`, `F` the `f` of the
-  acceptor configuration, D8) and its end is in the chain. The decided `Hold` (D9) comes
-  next.
+  acceptor configuration, D8) and its end is in the chain. The decided `Hold` (D9) is built
+  too: the leader proposes a `Command::Hold` for each segment its tally marks, in order, and the
+  fold accepts one only for the segment right after the held prefix (`JournalState::held`).
+  A retry of a write inside the held prefix is then `Outcome::Held`. The drop of a held segment
+  at the acceptors comes next.
 
 ## 10. Pitfalls
 

@@ -56,6 +56,7 @@ impl ColocatedNode {
             let sealed = SealedSegment {
                 start,
                 end: tail.start,
+                next_seq: self.replica.journal_at(slot).next_seq,
                 replicas: self
                     .replica
                     .journal_at(slot)
@@ -216,6 +217,7 @@ impl ColocatedNode {
                 "a completed publish waits no more"
             );
             self.judge_held(sealed);
+            self.propose_holds();
         }
         self.assert_invariants();
         completed

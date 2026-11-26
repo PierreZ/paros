@@ -3,7 +3,7 @@
 
 use super::chain::{drain_publishes, publish, rolled};
 use super::*;
-use crate::journal::{ReplicaSet, SegmentId};
+use crate::journal::{Command, Hold, Outcome, ReplicaSet, SegmentId, Seq};
 use crate::node::RollResult;
 
 fn held(from: u64, segment: u64, end: Slot) -> Message {
@@ -70,6 +70,21 @@ fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published
     assert_eq!(nodes[1].held_segments().count(), 0);
     nodes[1].step(held(4, 1, end));
     assert_eq!(nodes[1].held_segments().collect::<Vec<_>>(), [SegmentId(1)]);
+    // The first segment names no replicas, so it is never held, and the
+    // held segments of the log are a prefix: no `Hold` is proposed.
+    for _ in 0..3 {
+        for i in 0..nodes.len() {
+            let q = drain(&mut nodes[i]);
+            deliver_all(&mut nodes, q);
+        }
+    }
+    assert_eq!(nodes[0].replica().journal().held, None);
+    assert!(
+        nodes[0]
+            .chosen_commands()
+            .all(|(_, c)| !matches!(c, Command::Hold(_))),
+        "a segment past one that is not held gets no Hold"
+    );
 }
 
 /// The replicas of the first segment come from the configuration
@@ -111,6 +126,82 @@ fn the_first_segment_is_held_by_the_replicas_of_the_configuration() {
         nodes[0].held_segments().collect::<Vec<_>>(),
         [SegmentId::FIRST]
     );
+    // The leader proposes the `Hold` of the first segment at once, with the
+    // end and the position of its fold; every node folds it.
+    let hold = Hold {
+        segment: SegmentId::FIRST,
+        end,
+        next_seq: Seq(0),
+    };
+    let proposed: Vec<_> = nodes[0]
+        .proposer
+        .rounds()
+        .iter()
+        .filter(|(_, round)| *round.command() == Command::Hold(hold))
+        .map(|(slot, _)| *slot)
+        .collect();
+    assert_eq!(proposed.len(), 1, "one Hold for the held segment");
+    // Another report proposes no second `Hold`.
+    nodes[0].step(held(8, 0, end));
+    assert_eq!(
+        nodes[0]
+            .proposer
+            .rounds()
+            .iter()
+            .filter(|(_, round)| matches!(round.command(), Command::Hold(_)))
+            .count(),
+        1
+    );
+    for _ in 0..3 {
+        for i in 0..nodes.len() {
+            let q = super::route::drain_routed(&mut nodes[i], &mut routed);
+            routed.extend(super::route::deliver_routed(&mut nodes, q));
+        }
+    }
+    for node in &nodes {
+        assert_eq!(node.replica().journal().held, Some(hold));
+        assert_eq!(
+            node.replica().outcome_at(proposed[0]),
+            Some(&Outcome::HeldTo(hold))
+        );
+    }
+}
+
+/// A follower whose tally marks a segment proposes nothing: only the
+/// leader proposes a `Hold`.
+#[test]
+fn a_follower_proposes_no_hold() {
+    let first = ReplicaSet::new([NodeId(8), NodeId(9)]);
+    let (mut nodes, mut mms) = super::route::cluster_with_first(Some(&first), 3);
+    let q = super::route::matchmade(&mut nodes, 0, &mut mms);
+    deliver_all(&mut nodes, q);
+    let RollResult::Accepted { slot, .. } = nodes[0].roll(None) else {
+        panic!("the leader admits a roll");
+    };
+    let mut routed = Vec::new();
+    for _ in 0..3 {
+        for i in 0..nodes.len() {
+            let q = super::route::drain_routed(&mut nodes[i], &mut routed);
+            routed.extend(super::route::deliver_routed(&mut nodes, q));
+        }
+    }
+    nodes[1].resend_segment_publishes();
+    let requests = drain_publishes(&mut nodes[1]);
+    for ack in publish(&mut mms, &requests) {
+        let _ = nodes[1].on_segment_ack(&ack);
+    }
+    let end = Slot(slot.0 + 1);
+    nodes[1].step(held(8, 0, end));
+    nodes[1].step(held(9, 0, end));
+    assert_eq!(
+        nodes[1].held_segments().collect::<Vec<_>>(),
+        [SegmentId::FIRST]
+    );
+    assert!(
+        nodes[1].proposer.rounds().is_empty(),
+        "a follower opens no round"
+    );
+    assert_eq!(nodes[1].known_held(), None);
 }
 
 /// A plain deployment ignores every report.

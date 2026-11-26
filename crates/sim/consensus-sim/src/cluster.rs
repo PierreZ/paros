@@ -2656,10 +2656,12 @@ fn to_matchmakers<'a>(
 /// The FNV-1a digest of the `Debug` text of `batch`: every field of every
 /// value the core put in it, in order.
 fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
-    // A journal state with no replica set digests as it did before the
-    // field existed, so the digests of the flavors with no replicas of a
-    // segment stay those of the code before it.
-    let text = format!("{batch:?}").replace(", replicas: None }", " }");
+    // A journal state with no replica set and no held prefix digests as it
+    // did before the fields existed, so the digests of the flavors with no
+    // replicas of a segment and no `Hold` stay those of the code before them.
+    let text = format!("{batch:?}")
+        .replace(", held: None }", " }")
+        .replace(", replicas: None }", " }");
     fnv1a(paros_consensus::types::FNV_OFFSET, text.as_bytes())
 }
 

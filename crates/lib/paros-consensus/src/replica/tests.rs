@@ -80,6 +80,7 @@ fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
         first_seq: Seq(0),
         segment: crate::journal::Segment::default(),
         replicas: None,
+        held: None,
     };
     assert_eq!(r.trim_to(Slot(2), base.clone()), base);
     r.learn(Slot(2), &commands[2]);
@@ -197,6 +198,7 @@ fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
         first_seq: Seq(0),
         segment: crate::journal::Segment::default(),
         replicas: None,
+        held: None,
     };
     let commands = [
         claim(),
@@ -456,6 +458,7 @@ fn a_trim_point_below_the_fold_keeps_the_own_state() {
         first_seq: Seq(40),
         segment: crate::journal::Segment::default(),
         replicas: None,
+        held: None,
     };
     let base = r.trim_to(Slot(2), peer);
     assert_eq!(

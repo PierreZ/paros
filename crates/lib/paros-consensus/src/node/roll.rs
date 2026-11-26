@@ -109,14 +109,38 @@ impl ColocatedNode {
     }
 
     /// The tail segment as this node knows the log (R4c): the fold of its
-    /// chosen prefix, then each later `Roll` it knows, in slot order, when it
-    /// names the tail plus one ([`SegmentId::after`]). It knows a `Roll`
-    /// chosen, in an open round, or still pending in its recovery (a
-    /// bounded recovery opens its rounds a page at a time;
-    /// [`Recovery::pending`] leaves out the slots the repair probe owns). A
-    /// guess that is wrong costs a `Roll` the fold ignores, never safety.
+    /// chosen prefix, then each later `Roll` it knows
+    /// ([`ColocatedNode::known_past_fold`]), in slot order, when it names the
+    /// tail plus one ([`SegmentId::after`]). A guess that is wrong costs a
+    /// `Roll` the fold ignores, never safety.
     pub(super) fn tail_segment(&self) -> SegmentId {
         let folded = self.replica.journal().segment.id;
+        let later = self.known_past_fold();
+        let known = later.len();
+        let mut tail = folded;
+        for command in later.into_values() {
+            if let Command::Roll(roll) = command {
+                tail = tail.after(roll);
+            }
+        }
+        assert!(
+            tail >= folded,
+            "the known tail is at or past the folded one"
+        );
+        assert!(
+            usize::try_from(tail.0 - folded.0).is_ok_and(|rolls| rolls <= known),
+            "each step of the known tail is one Roll the node knows above its fold"
+        );
+        tail
+    }
+
+    /// The commands this node knows above its fold, by slot: chosen, in an
+    /// open round, or still pending in its recovery (a bounded recovery
+    /// opens its rounds a page at a time; [`Recovery::pending`] leaves out
+    /// the slots the repair probe owns). A chosen value wins over an open
+    /// round at the same slot, and an open round over a recovered value it
+    /// has not proposed yet.
+    pub(super) fn known_past_fold(&self) -> BTreeMap<Slot, &Command> {
         let after = self.replica.folded();
         let chosen = self.replica.chosen().range(after..).filter_map(|slot| {
             self.replica
@@ -136,26 +160,13 @@ impl ColocatedNode {
             .flat_map(Recovery::pending)
             .filter(|(slot, _)| **slot >= after)
             .map(|(slot, command)| (*slot, command));
-        // A chosen value wins over an open round at the same slot, and an
-        // open round over a recovered value it has not proposed yet.
         let mut later: BTreeMap<Slot, &Command> = recovered.collect();
         later.extend(open);
         later.extend(chosen);
-        let known = later.len();
-        let mut tail = folded;
-        for command in later.into_values() {
-            if let Command::Roll(roll) = command {
-                tail = tail.after(roll);
-            }
-        }
         assert!(
-            tail >= folded,
-            "the known tail is at or past the folded one"
+            later.keys().all(|slot| *slot >= after),
+            "every known command lies above the fold"
         );
-        assert!(
-            usize::try_from(tail.0 - folded.0).is_ok_and(|rolls| rolls <= known),
-            "each step of the known tail is one Roll the node knows above its fold"
-        );
-        tail
+        later
     }
 }

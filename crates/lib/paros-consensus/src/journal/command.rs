@@ -3,7 +3,7 @@
 use crate::types::{FNV_OFFSET, Fingerprint, Value, Weigh, fnv1a};
 
 use super::ids::{LeaderUuid, Seq};
-use super::segment::{ReplicaSet, Roll};
+use super::segment::{Hold, ReplicaSet, Roll};
 
 /// A journal **`Write`** as it is decided into one slot (#204): the batch
 /// `records`, to be accepted at position `seq` iff `leader` is the
@@ -110,6 +110,10 @@ pub enum Command {
     /// [`crate::ColocatedNode::roll`]. Its own variant, not a [`Control`], so
     /// that a driver that forwards a client's `Control` can never propose one.
     Roll(Roll),
+    /// The held floor of a sealed segment (§4.7, R7 and D9), proposed only
+    /// by a leader whose held tally marked the segment. Its own variant for
+    /// the same reason as [`Command::Roll`].
+    Hold(Hold),
 }
 
 impl Fingerprint for Command {
@@ -120,9 +124,10 @@ impl Fingerprint for Command {
 
 impl Weigh for Command {
     /// A write weighs its records' bytes, the measure of a read's
-    /// `max_bytes`. A control command and a `Roll` carry no client bytes
-    /// and weigh nothing: the weight bounds what clients put in the log,
-    /// and a `Roll` is an operator's call whose replica set is a few ids.
+    /// `max_bytes`. A control command, a `Roll` and a `Hold` carry no
+    /// client bytes and weigh nothing: the weight bounds what clients put
+    /// in the log, a `Roll` is an operator's call whose replica set is a
+    /// few ids, and a `Hold` is three scalars.
     fn weight(&self) -> u64 {
         match self {
             Self::Write(entry) => {
@@ -137,7 +142,7 @@ impl Weigh for Command {
                 );
                 bytes
             }
-            Self::Control(_) | Self::Roll(_) => 0,
+            Self::Control(_) | Self::Roll(_) | Self::Hold(_) => 0,
         }
     }
 }
@@ -186,6 +191,16 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             }
             hash
         }
+        Command::Hold(Hold {
+            segment,
+            end,
+            next_seq,
+        }) => {
+            let hash = fnv1a(FNV_OFFSET, &[5]);
+            let hash = fnv1a(hash, &segment.0.to_le_bytes());
+            let hash = fnv1a(hash, &end.0.to_le_bytes());
+            fnv1a(hash, &next_seq.0.to_le_bytes())
+        }
     }
 }
 
@@ -195,7 +210,7 @@ impl Command {
     pub fn write(&self) -> Option<&Entry> {
         match self {
             Command::Write(entry) => Some(entry),
-            Command::Control(_) | Command::Roll(_) => None,
+            Command::Control(_) | Command::Roll(_) | Command::Hold(_) => None,
         }
     }
 }
