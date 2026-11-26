@@ -3,9 +3,9 @@
 EXTENDS HeldFloor, TLC
 
 \* The acceptor and replica names, the truncation value and the `Roll`
-\* value, the `Hold` value and the retry value: model values that the
+\* value, the `Hold` value, the retry value and the commands: model values that the
 \* configurations set.
-CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1, w1
+CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1, w1, c1, c2
 
 \* A majority of the acceptors, the same for every slot.
 Majorities == {Q \in SUBSET Acceptors : 2 * Cardinality(Q) > Cardinality(Acceptors)}
@@ -25,8 +25,10 @@ NoCut == [c \in {} |-> 0]
 NoHold == [h \in {} |-> 1]
 Hold1 == [h \in {hold1} |-> 1]
 
-\* Each retry, `w1`, retries the one command of the check.
+\* Each retry, `w1`, retries the one command of the check; or `c2`, the
+\* second command.
 RetryOne == [v \in Retries |-> CHOOSE c \in Commands : TRUE]
+RetryC2 == [v \in Retries |-> c2]
 
 \* One `Roll`, `roll2`, which opens segment 2; or two, `roll2` and `roll3`.
 Roll2 == [v \in {roll2} |-> 2]
@@ -51,6 +53,18 @@ HoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN R
 \* then `hold1`.
 RetryPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls
                                        ELSE IF s = 2 THEN Retries ELSE HoldCmds])
+\* `InnerPlan`: the command, a retry of it, `roll2`, then `hold1`: the
+\* retry is inside segment 1.
+InnerPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Retries
+                                       ELSE IF s = 2 THEN Rolls ELSE HoldCmds])
+\* `KeepPlan`: `c1`, `c2`, `roll2`, a retry of `c2` in segment 2, then
+\* `hold1`: the drop keeps slot 1 and drops slot 0.
+KeepPlan == Planned([s \in Slots |-> IF s = 0 THEN {c1} ELSE IF s = 1 THEN {c2}
+                                      ELSE IF s = 2 THEN Rolls ELSE IF s = 3 THEN Retries
+                                      ELSE HoldCmds])
+\* `a3` votes for no slot: the votes of `a1` and `a2` choose every slot.
+\* A scenario constraint that keeps the five slots of `KeepPlan` small.
+QuietA3 == ~\E m \in msgs : m.type = "2b" /\ m.acc = a3
 CmdPlan3 == Planned([s \in Slots |-> IF s = 1 THEN Rolls ELSE Commands])
 
 \* The two replicas of segment 1 are alike.

@@ -7,6 +7,5 @@
 #   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
 #             long       only `scripts/check-tla.sh --all` runs it
 hold_decided       pass       ci
-hold_retry         pass       ci
 hold_loss          pass       ci
 hold_held          pass       long  60

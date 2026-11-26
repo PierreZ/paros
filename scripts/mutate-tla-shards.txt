@@ -22,10 +22,11 @@ handover 5
 handover-chain 1
 handover-gc 1
 handover-scalars 2
-held-floor 3
+held-floor 4
 held-floor-hold 0
 held-floor-pass 0
 held-floor-reconfig 1
+held-floor-retry 0
 journal-ids 3
 leader-handoff 12
 matchmaker 3

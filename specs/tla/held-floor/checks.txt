@@ -27,3 +27,5 @@ three_slots        pass       long  60
 hold_end           violation  ci
 reach_retry_keep   violation  ci
 reach_hold_laggard violation  long  60
+hold_jump          violation  ci
+reach_keep_mid     violation  ci
