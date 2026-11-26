@@ -831,6 +831,62 @@ impl Replica {
     #[must_use]
     pub fn compaction_target<L: ChosenLog + ?Sized>(&self, log: &L) -> Option<Slot> {
         let mut first = self.slot_holding(log, self.state.first_seq);
+        // A sealed replica keeps the `Roll` that ends its segment (R6): its
+        // base, the state at its floor, stays in the segment it keeps.
+        if let Some(end) = self.sealed_end() {
+            assert!(end.0 >= 1, "a sealed end lies past the `Roll`");
+            first = first.min(Slot(end.0 - 1));
+        }
+        let first = self.kept_from(log, first);
+        assert!(
+            first >= self.floor,
+            "a compaction floor lies at or above the floor"
+        );
+        assert!(
+            first <= self.folded,
+            "a compaction floor lies at or below the fold"
+        );
+        first.0.checked_sub(1).map(Slot)
+    }
+
+    /// The highest slot at or below `up_to` that a decided truncation lets
+    /// this replica drop: the [`Replica::compaction_target`] when `up_to`
+    /// reaches it, else the slot below the floor that keeps every record a
+    /// retained retry at or above it reads, walked down from the floor
+    /// `up_to + 1`. Never above what may drop. A result below the current
+    /// floor means that nothing new goes. `None` when nothing may go.
+    ///
+    /// A caller that asks for less than the target must not take `up_to`
+    /// as it is: a retry above `up_to` may read a record at or below it,
+    /// and a refold from that floor would judge the retry `Refused` where
+    /// every other node judged it `Duplicate` (the clamp of
+    /// `KeepFrom` in `specs/tla/held-floor/`).
+    ///
+    /// # Panics
+    ///
+    /// If the positions index lost the write holding a retained record: a
+    /// programmer error.
+    #[must_use]
+    pub fn compaction_floor<L: ChosenLog + ?Sized>(&self, log: &L, up_to: Slot) -> Option<Slot> {
+        let target = self.compaction_target(log)?;
+        // The target is a fixed point, so a request at or past it stays there.
+        let start = Slot(up_to.min(target).0 + 1);
+        let first = self.kept_from(log, start);
+        assert!(first <= start, "a clamp never rises");
+        assert!(
+            first >= self.floor || start <= self.floor,
+            "a clamp lies at or above the floor"
+        );
+        first.0.checked_sub(1).map(Slot)
+    }
+
+    /// The lowest floor at or below `first` that keeps every record a
+    /// retained single-writer retry reads: walk down to the slot holding
+    /// the lowest record a retry at or above the floor read, until that is
+    /// a fixed point. Never below the floor of this replica unless `first`
+    /// already is.
+    fn kept_from<L: ChosenLog + ?Sized>(&self, log: &L, mut first: Slot) -> Slot {
+        let start = first;
         loop {
             let needed = self
                 .chosen
@@ -860,21 +916,12 @@ impl Replica {
             );
             first = needed;
         }
-        // A sealed replica keeps the `Roll` that ends its segment (R6): its
-        // base, the state at its floor, stays in the segment it keeps.
-        if let Some(end) = self.sealed_end() {
-            assert!(end.0 >= 1, "a sealed end lies past the `Roll`");
-            first = first.min(Slot(end.0 - 1));
-        }
+        assert!(first <= start, "the fixed point lies at or below its start");
         assert!(
-            first >= self.floor,
+            first >= self.floor || first == start,
             "a compaction floor lies at or above the floor"
         );
-        assert!(
-            first <= self.folded,
-            "a compaction floor lies at or below the fold"
-        );
-        first.0.checked_sub(1).map(Slot)
+        first
     }
 
     /// The slot holding the record at `position` — the write whose batch
@@ -1432,13 +1479,22 @@ impl Replica {
     ///
     /// # Panics
     ///
-    /// If `first` lies outside `[floor, folded]`, or would drop a record at
-    /// or past the journal's first retained position.
+    /// If `first` lies outside `[floor, folded]`, would drop a record at or
+    /// past the journal's first retained position, or would drop a record a
+    /// retained retry at or above it reads ([`Replica::compaction_floor`]
+    /// gives a floor that keeps them).
     pub fn truncate<L: ChosenLog + ?Sized>(&mut self, log: &L, first: Slot) -> JournalState {
         assert!(
             self.compaction_target(log)
                 .is_some_and(|t| first.0 <= t.0 + 1),
             "a truncation never drops a retained record"
+        );
+        // Checked apart from the clamp of the caller: a floor below the
+        // target is a fixed point of `kept_from`, so every retry at or above
+        // it still holds the record it was judged against.
+        assert!(
+            self.kept_from(log, first) == first,
+            "a truncation keeps every record a retry above it reads"
         );
         let base = self.state_at(first);
         // Checked apart from `compaction_target` (#269): every record the

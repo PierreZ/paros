@@ -2063,7 +2063,8 @@ each of them:
   model reads the fold from the chosen log: every node folds the same log. Each node compacts at
   its own time, so the floors of the nodes differ for some time. A compaction can also stop
   below the target, since `ColocatedNode::compact(up_to)` clamps the floor to the driver's
-  `up_to`. An acceptor holds no vote and no learned value below its floor.
+  `up_to` (lowered to a floor that keeps every record a retry above it reads,
+  `Replica::compaction_floor`; this model has no retry). An acceptor holds no vote and no learned value below its floor.
 - **The floor guard in Phase 1** (`PrepareOutcome::BelowFloor`, `node/acceptor.rs`). A campaign
   asks from its first unchosen slot. An acceptor whose floor is above that slot does not promise
   and does not move its promise, because its promise could not report the slots that it

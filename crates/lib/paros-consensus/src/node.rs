@@ -907,8 +907,10 @@ impl ColocatedNode {
     /// `up_to` is the last slot the caller permits dropping (inclusive); the
     /// floor stored in the log is the first slot *retained*. The request is
     /// clamped to what the journal fold lets go
-    /// ([`Replica::compaction_target`]: every slot below the one holding the
-    /// journal's first retained record, never an undecided or unfolded one),
+    /// ([`Replica::compaction_floor`]: every slot below the one holding the
+    /// journal's first retained record, never an undecided or unfolded one,
+    /// and never a record that a retained retry at or above the new floor
+    /// reads),
     /// which makes the call safe to over-request and idempotent (a floor never
     /// moves backward). When the floor would not rise it is a no-op that emits
     /// no [`WriteOp::Truncate`].
@@ -929,10 +931,9 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
         self.assert_landed();
-        let Some(target) = self.replica.compaction_target(&self.acceptor) else {
+        let Some(highest_drop) = self.replica.compaction_floor(&self.acceptor, up_to) else {
             return self.acceptor.first_slot();
         };
-        let highest_drop = up_to.min(target);
         let old_floor = self.acceptor.first_slot();
         let first = Slot(highest_drop.0 + 1).max(old_floor);
         if first <= old_floor {

@@ -134,6 +134,57 @@ fn a_floor_keeps_every_record_a_retained_slot_compares_against() {
     assert_eq!(rebooted.journal(), r.journal());
 }
 
+/// The commands of a journal whose retry (slot 2, of position 0) lies
+/// below the slot holding the first retained record (slot 4, position 2):
+/// the target lets slots up to 3 go, but a floor between the retry's
+/// record and the retry would drop the record the retry reads.
+fn retry_below_the_first_record() -> [Command; 6] {
+    [
+        claim(),
+        write(0, &[b"a"]),
+        write(0, &[b"a"]), // a retry of position 0
+        write(1, &[b"b"]),
+        write(2, &[b"c"]),
+        truncate_to(2, 1),
+    ]
+}
+
+#[test]
+fn a_truncation_below_the_target_keeps_the_record_a_retry_above_it_reads() {
+    let commands = retry_below_the_first_record();
+    let mut r = replica(&commands);
+    assert_eq!(r.compaction_target(), Some(Slot(3)));
+    assert!(matches!(
+        r.outcome_at(Slot(2)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    // A caller that asks for less than the target: drop up to slot 1. The
+    // retry at slot 2 reads position 0 at slot 1, so the floor stops at 1.
+    assert_eq!(r.compaction_floor(Slot(1)), Some(Slot(0)));
+    assert_eq!(r.compaction_floor(Slot(2)), Some(Slot(2))); // the retry goes with its record
+    assert_eq!(r.compaction_floor(Slot(3)), Some(Slot(3)));
+    assert_eq!(r.compaction_floor(Slot(9)), Some(Slot(3)));
+    assert_eq!(r.compaction_floor(Slot(0)), Some(Slot(0)));
+    let first = Slot(1);
+    let sealed = r.truncate(first);
+    let mut recs = records(&commands);
+    recs.retain(|slot, _| *slot >= first);
+    let rebooted = Held::boot(WriterMode::Single, Some(Slot(5)), first, sealed, &recs);
+    assert!(matches!(
+        rebooted.outcome_at(Slot(2)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    assert_eq!(rebooted.journal(), r.journal());
+}
+
+#[test]
+#[should_panic(expected = "a truncation keeps every record a retry above it reads")]
+fn a_truncation_between_a_retry_and_its_record_panics() {
+    let commands = retry_below_the_first_record();
+    let mut r = replica(&commands);
+    let _ = r.truncate(Slot(2));
+}
+
 #[test]
 fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
     // A node that jumped to slot 2 holds nothing below it: positions 0
