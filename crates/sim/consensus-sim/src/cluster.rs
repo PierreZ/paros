@@ -2581,15 +2581,26 @@ struct Known {
     first: Option<ReplicaSet>,
     /// The first slot the node's fold has not applied.
     folded: Slot,
+    /// The lowest slot at or past `folded` where the node holds a `Roll`
+    /// record: the last slot of the tail segment as far as the node knows.
+    tail_end: Option<Slot>,
 }
 
 impl Known {
     fn of(node: &paros_consensus::ColocatedNode) -> Self {
+        let folded = node.replica().folded();
+        let tail_end = node
+            .acceptor()
+            .records()
+            .range(folded..)
+            .find(|(_, (_, command))| matches!(command, Command::Roll(_)))
+            .map(|(slot, _)| *slot);
         Self {
             belief: node.acceptors_since(),
             tail: node.replica().journal(),
             first: node.config().segment_replicas.clone(),
-            folded: node.replica().folded(),
+            folded,
+            tail_end,
         }
     }
 }
@@ -2611,7 +2622,10 @@ fn plant_driver(mutant: Option<Mutant>, known: &Known, batch: &mut Vec<(Audience
 
 /// The [`Mutant::RouteOnDecision`] bug: a `Commit` a leader sends to the
 /// learners for a slot its fold has not reached also goes to the replicas
-/// of its tail segment, at the decision, over the hole below it.
+/// of its tail segment, at the decision, over the hole below it. It routes
+/// no slot past a `Roll` the leader holds above its fold: that slot is of
+/// a later segment, a second bug that `ROUTE_TRUE` judges, and the control
+/// plants one bug.
 fn route_on_decision(known: &Known, batch: &mut Vec<(Audience, Message)>) {
     let tail = &known.tail;
     let Some(replicas) = tail.replicas.clone().or_else(|| known.first.clone()) else {
@@ -2621,7 +2635,8 @@ fn route_on_decision(known: &Known, batch: &mut Vec<(Audience, Message)>) {
         .iter()
         .filter(|(audience, message)| {
             !matches!(audience, Audience::ReplicasOf { .. })
-                && matches!(message, Message::Commit { slot, .. } if *slot > known.folded)
+                && matches!(message, Message::Commit { slot, .. }
+                    if *slot > known.folded && known.tail_end.is_none_or(|end| *slot <= end))
         })
         .map(|(_, message)| {
             (

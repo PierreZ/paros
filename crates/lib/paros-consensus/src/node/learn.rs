@@ -222,6 +222,7 @@ impl ColocatedNode {
             .replica
             .advance(&self.acceptor, &mut self.pending_writes);
         self.note_rolls();
+        self.judge_released();
         self.route_to_segment_replicas();
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);

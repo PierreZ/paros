@@ -52,13 +52,47 @@ impl ColocatedNode {
             .as_ref()
             .is_some_and(|p| Publisher::is_published(p, segment));
         let config = self.belief.config();
+        let first_seq = self.replica.journal().first_seq;
         let Some(held) = self.held.as_mut() else {
             return;
         };
-        if held.judge(segment, config, published) {
+        if held.judge(segment, config, published, first_seq) {
             assert!(published, "a held segment's end is in the chain");
             assert!(held.is_held(segment), "a judged segment is marked held");
         }
+    }
+
+    /// Judge each noted segment that the fold's `first_seq` released, after
+    /// a walk: a `Truncate` can release a segment whose end the chain
+    /// already holds, and no report or publish comes after it. Then propose
+    /// the `Hold`s it allows.
+    pub(super) fn judge_released(&mut self) {
+        let first_seq = self.replica.journal().first_seq;
+        let Some(held) = self.held.as_ref() else {
+            return;
+        };
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment keeps a held tally"
+        );
+        let released: Vec<SegmentId> = held.released(first_seq).collect();
+        if released.is_empty() {
+            return;
+        }
+        for segment in released {
+            self.judge_held(segment);
+            // The released rule: a released segment needs no report, only
+            // its end in the chain.
+            let published = self
+                .publisher
+                .as_ref()
+                .is_some_and(|p| Publisher::is_published(p, segment));
+            assert!(
+                !published || self.held.as_ref().is_some_and(|h| h.is_held(segment)),
+                "a released segment whose end is in the chain is held"
+            );
+        }
+        self.propose_holds();
     }
 
     /// The held prefix as this node knows the log: the fold's, then each
