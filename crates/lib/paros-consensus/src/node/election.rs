@@ -661,6 +661,7 @@ impl ColocatedNode {
             "every counted promise comes from the addressable pool"
         );
         self.role = NodeRole::Leader;
+        self.quorum_window_lost = false;
         self.leader = Some(me);
         self.ballot = outcome.ballot;
         // Registration precedes exercise (#120, invariant 5): Phase 2 runs
