@@ -14,7 +14,7 @@ The modules make three layers that point down only (#730 (paros-consensus rework
 - **Foundations**: `probe`, `types`, `membership`, `journal`, `contract`, `retained`. A
   foundation uses only foundations.
 - **Roles**: `acceptor`, `proposer`, `replica`, `belief`, `quorum_read`, `batcher`, `collector`,
-  `decree`, `matchmaking`, `matchmaker`, `publisher`. A role uses foundations and roles, never a deployment.
+  `controller`, `decree`, `matchmaking`, `matchmaker`, `publisher`. A role uses foundations and roles, never a deployment.
 - **Deployments**: `node`, `proxy_leader`, `replica_node`. A deployment wires roles and owns
   one `Ready`. It never uses another deployment.
 
@@ -67,6 +67,7 @@ Roles (pure tallies, no deployment knowledge):
 - `publisher.rs` → `Publisher` → the node-side tally of the chain's publishes (R5): each `SegmentPublish` until a majority of one matchmaker generation acked it; reset at a new generation.
 - `collector/held.rs` → `HeldTally`, `SealedSegment` → the held tally of R7 (§4.7): the replicas that reported a sealed segment (`Message::SegmentHeld`), counted against `F` by `AcceptorConfig::is_held_by` once the end is published; wired in `node/held.rs` (`ColocatedNode::held_segments`).
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor. Its rule across a reconfiguration onto empty stores (`covered`: a Phase-2 quorum of `C_b` at or past the fence) has its TLA+ model in `specs/tla/truncation-reconfig/` (#1218 (truncation model, part 3)).
+- `controller.rs` + `controller/` → `View`, `evaluate`, `Policy`, `Spare`, `Decision`, `Order`, `HoldReason` → the journal controller of version 1 (#1564 (journal controller, version 1), §4.8): `view.rs` holds the last feedback of each deployment of one journal and its age in ticks of the holder; `rules.rs` is the ordered table of rules that `evaluate` reads from the top. It uses only the foundations, sends nothing and persists nothing; each order is a call a driver already makes.
 - `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`), and any one-shot decision a caller above the core runs. Its TLA+ model is `specs/tla/decree/` (#1186 (rework 1.15)).
 - `matchmaking.rs` → `Matchmaking` → the candidate's matchmaking phase; `matchmaking/probe.rs` → `MembershipProbe` (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below); a history page (`history_page`) leaves out a belief a later registration repeats (#570 (election duel outlasts the recovery tail)), but keeps each owner's lowest registration of each configuration (PR #1064 (gone-node gap)).
