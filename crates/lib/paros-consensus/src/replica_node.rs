@@ -25,7 +25,9 @@
 //!   and is ignored.
 //! - **Out:** `CatchUpRequest`, to the beat's sender when its watermark is
 //!   ahead of this replica's prefix, and on the driver's tick while a faulty
-//!   record is open; `PreRead`, to a row of acceptors, for a quorum read. A
+//!   record is open; `PreRead`, to a row of acceptors, for a quorum read;
+//!   `SegmentHeld`, to the beat's sender, once sealed with its whole
+//!   segment on a matchmaker deployment (R7 of §4.7). A
 //!   replica serves no peer: healing it is the acceptors' job, as healing a
 //!   lagging acceptor is.
 //! - **Reads:** the journal read ([`ReplicaNode::read_log`], #185) is served
@@ -627,6 +629,47 @@ impl ReplicaNode {
         if commit > self.replica.chosen_index() && !self.replica.is_sealed() {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
+        self.report_held(from);
+    }
+
+    /// Answer a beat with [`Message::SegmentHeld`] when this replica holds
+    /// the whole segment it keeps (R7): it is sealed, and its floor is the
+    /// start of the segment, so it dropped none of its slots. A replica that compacted inside its
+    /// segment or jumped into it reports nothing (**Open**: such a replica
+    /// holds every slot that a decided `Truncate` did not release, and the
+    /// rule that counts it needs its model). The records are durable before the report leaves:
+    /// persist before send.
+    fn report_held(&mut self, leader: NodeId) {
+        if !self.config.has_matchmakers() {
+            return;
+        }
+        let Some(end) = self.replica.sealed_end() else {
+            return;
+        };
+        let base = self.replica.journal_base().segment;
+        if self.floor != base.start {
+            return;
+        }
+        // A damaged record is a hole in the fold, which then stops below
+        // the `Roll`; one past the end is dropped at the seal. So a sealed
+        // replica holds no damaged record of its segment.
+        assert!(
+            self.faulty.is_empty(),
+            "a sealed replica holds no damaged record"
+        );
+        assert!(base.start < end, "a sealed segment holds its `Roll`");
+        assert!(
+            self.replica.segment_bound() == Some(base.id),
+            "a sealed replica keeps the segment of its base"
+        );
+        self.pending_messages.push((
+            Audience::Node(leader),
+            Message::SegmentHeld {
+                from: self.config.id,
+                segment: base.id,
+                end,
+            },
+        ));
     }
 
     /// The basis this replica's quorum reads are judged over (#260,
@@ -1141,9 +1184,22 @@ impl ReplicaNode {
         assert!(
             self.pending_messages.iter().all(|(_, m)| matches!(
                 m,
-                Message::CatchUpRequest { .. } | Message::PreRead { .. }
+                Message::CatchUpRequest { .. }
+                    | Message::PreRead { .. }
+                    | Message::SegmentHeld { .. }
             )),
-            "a replica sends nothing but catch-up requests and pre-reads"
+            "a replica sends nothing but catch-up requests, pre-reads and held reports"
+        );
+        assert!(
+            self.pending_messages.iter().all(|(_, m)| match m {
+                Message::SegmentHeld { from, segment, .. } => {
+                    *from == self.config.id
+                        && self.replica.is_sealed()
+                        && self.replica.segment_bound() == Some(*segment)
+                }
+                _ => true,
+            }),
+            "a held report comes from a sealed replica of its segment, in its own name"
         );
         assert!(
             self.quorum_reads

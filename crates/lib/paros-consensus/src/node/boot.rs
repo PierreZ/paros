@@ -170,6 +170,7 @@ impl ColocatedNode {
             rolls_noted: Slot(0),
             segment_routed: Slot(0),
             choosing: BTreeMap::new(),
+            held: matchmakers.as_ref().map(|_| Box::default()),
             pending_segment_publishes: Vec::new(),
             matchmakers,
             matchmaker_pool,

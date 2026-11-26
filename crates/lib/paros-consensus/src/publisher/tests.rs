@@ -52,8 +52,17 @@ fn a_publish_completes_at_a_majority_of_its_generation() {
     assert_eq!(publisher.requests(&set).count(), 6);
     assert_eq!(publisher.fold_ack(&ack(0, 0, 0), &set), None);
     assert_eq!(publisher.requests(&set).count(), 5);
+    assert!(!publisher.is_published(SegmentId(0)));
     assert_eq!(publisher.fold_ack(&ack(1, 0, 0), &set), Some(SegmentId(0)));
     assert_eq!(publisher.pending().collect::<Vec<_>>(), [SegmentId(1)]);
+    assert!(publisher.is_published(SegmentId(0)));
+    assert!(!publisher.is_published(SegmentId(1)));
+    publisher.note(publish(0, 4));
+    assert_eq!(
+        publisher.pending().collect::<Vec<_>>(),
+        [SegmentId(1)],
+        "a completed publish noted again waits no more"
+    );
     assert_eq!(
         publisher.fold_ack(&ack(2, 0, 0), &set),
         None,

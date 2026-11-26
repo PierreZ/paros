@@ -9,12 +9,15 @@ use crate::matchmaker::{SegmentAck, SegmentPublish};
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::node::RollResult;
 
-fn drain_publishes(n: &mut ColocatedNode) -> Vec<(MatchmakerId, SegmentPublish)> {
+pub(super) fn drain_publishes(n: &mut ColocatedNode) -> Vec<(MatchmakerId, SegmentPublish)> {
     drain_with(n, |ready| ready.segment_publishes().to_vec()).1
 }
 
 /// Deliver `requests` to the matchmakers, and return their acks.
-fn publish(mms: &mut [Matchmaker], requests: &[(MatchmakerId, SegmentPublish)]) -> Vec<SegmentAck> {
+pub(super) fn publish(
+    mms: &mut [Matchmaker],
+    requests: &[(MatchmakerId, SegmentPublish)],
+) -> Vec<SegmentAck> {
     let mut acks = Vec::new();
     for (id, request) in requests {
         let mm = &mut mms[usize::try_from(id.0).expect("matchmaker index")];
@@ -27,7 +30,7 @@ fn publish(mms: &mut [Matchmaker], requests: &[(MatchmakerId, SegmentPublish)]) 
 
 /// A cluster of three matchmakers whose leader rolled to `replicas` and
 /// whose `Roll` every node walked. Returns the slot of the `Roll`.
-fn rolled(replicas: Option<ReplicaSet>) -> ([ColocatedNode; 5], Vec<Matchmaker>, Slot) {
+pub(super) fn rolled(replicas: Option<ReplicaSet>) -> ([ColocatedNode; 5], Vec<Matchmaker>, Slot) {
     let (mut nodes, mms) = deployed_cluster_with(3);
     let RollResult::Accepted { slot, .. } = nodes[0].roll(replicas) else {
         panic!("the leader admits a roll");

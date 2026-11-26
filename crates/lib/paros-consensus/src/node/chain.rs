@@ -16,6 +16,7 @@
 //! publisher, and publishes nothing.
 
 use super::ColocatedNode;
+use crate::collector::SealedSegment;
 use crate::journal::{Command, Opening, SegmentId};
 use crate::matchmaker::{SegmentAck, SegmentPublish};
 use crate::membership::MatchmakerId;
@@ -52,6 +53,18 @@ impl ColocatedNode {
                 panic!("a folded Roll is a Roll in the chosen log");
             };
             assert!(tail.id > SegmentId::FIRST, "a Roll opens a later segment");
+            let sealed = SealedSegment {
+                start,
+                end: tail.start,
+                replicas: self
+                    .replica
+                    .journal_at(slot)
+                    .replicas
+                    .or_else(|| self.config.segment_replicas.clone()),
+            };
+            if let Some(held) = self.held.as_mut() {
+                held.note(SegmentId(tail.id.0 - 1), sealed);
+            }
             publishes.push(SegmentPublish {
                 from: self.config.id,
                 journal: self.config.journal.journal,
@@ -203,6 +216,7 @@ impl ColocatedNode {
                 self.pending_segment_publishes().all(|s| s != sealed),
                 "a completed publish waits no more"
             );
+            self.judge_held(sealed);
         }
         self.assert_invariants();
         completed
