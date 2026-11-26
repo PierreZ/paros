@@ -111,6 +111,14 @@ fn a_matchmaker_quorum_makes_the_floor_effective_and_retires_the_removed_accepto
             retired: vec![NodeId(2)],
         }
     );
+    // The feedback of the leader reports the effective floor, and no prior
+    // configuration is in force any more.
+    let leading = nodes[0].feedback().leading.expect("node 0 leads");
+    assert_eq!(leading.gc_effective, Some((ballot, vec![NodeId(2)])));
+    assert!(
+        leading.prior.is_empty(),
+        "no prior configuration is in force"
+    );
     assert!(
         !nodes[0].gc_pending(),
         "an effective floor needs no request"
@@ -319,6 +327,28 @@ fn configurations_in_force_drop_the_prior_ones_once_the_floor_is_effective() {
     let (prior, current) = nodes[0].configs_in_force().expect("node 0 leads");
     assert_eq!(*current, cfg(&[0, 1]));
     assert_eq!(prior, vec![&cfg(&[0, 1, 2])]);
+    let leading = nodes[0].feedback().leading.expect("node 0 leads");
+    assert_eq!(
+        leading.prior,
+        vec![cfg(&[0, 1, 2])],
+        "the feedback reports it"
+    );
+    // Node 2 is outside the configuration it heard.
+    assert!(
+        nodes[2]
+            .feedback()
+            .insights
+            .contains(&crate::contract::feedback::NodeInsight::Outside)
+    );
+    // A matchmaker reports the effective configuration and the highest
+    // registration of the journal.
+    let mm = mms[0].feedback(J);
+    assert_eq!(mm.id, mms[0].id());
+    assert!(mm.active);
+    assert_eq!(mm.set, *mms[0].set());
+    assert_eq!(mm.effective.map(|(_, c)| c), Some(cfg(&[0, 1])));
+    assert_eq!(mm.highest, mms[0].highest(J));
+    assert_eq!(mm.gc_watermark, mms[0].gc_watermark(J));
     let requests = gc_requests(&mut nodes[0]);
     let acks = answer(&mut mms, &requests);
     let _ = nodes[0].on_gc_ack(&acks[0]);

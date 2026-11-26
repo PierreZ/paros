@@ -13,6 +13,7 @@ mod catch_up;
 mod chain;
 mod counters;
 mod election;
+mod feedback;
 mod gc;
 mod handoff;
 mod helpers;

@@ -88,6 +88,8 @@ Each one prints a trace and asserts each claim of it.
    8. The leader cuts the log into a new segment (`roll`), and the matchmakers hold the chain. The replicas keep segment 0: they seal at its end.
    9. The leader crashes in the full deployment. A new leader takes over, and garbage collection
       lets the matchmakers forget the old configurations.
+   10. Each deployment reports its `feedback` as plain data. The leader sees a crashed member miss
+       its quorum windows.
 
 ```sh
 cargo run -p paros-consensus --example single_decree

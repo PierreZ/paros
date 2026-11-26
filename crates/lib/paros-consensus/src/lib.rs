@@ -144,7 +144,7 @@
 //! | Example | Shows |
 //! |---|---|
 //! | `single_decree` | [`decree::Decree`] and [`acceptor::Acceptor`]: Phase 1, P2c, Phase 2 for one value, and a restart |
-//! | `grow` | one journal that grows from three nodes to five acceptors, a grid, [`ProxyLeader`]s and [`ReplicaNode`]s with [`ColocatedNode::reconfigure`], then a handover of the [`Matchmaker`]s ([`MatchmakerReconfigurer`]), [`ColocatedNode::relinquish_to`], [`ColocatedNode::roll`] and two leader crashes |
+//! | `grow` | one journal that grows from three nodes to five acceptors, a grid, [`ProxyLeader`]s and [`ReplicaNode`]s with [`ColocatedNode::reconfigure`], then a handover of the [`Matchmaker`]s ([`MatchmakerReconfigurer`]), [`ColocatedNode::relinquish_to`], [`ColocatedNode::roll`], two leader crashes and the `feedback` of each deployment |
 //!
 //! # Features
 //!

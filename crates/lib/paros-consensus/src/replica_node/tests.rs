@@ -273,6 +273,19 @@ fn replicas_apply_in_order_and_heal_a_dropped_commit_through_catch_up() {
     assert_eq!(replica_log, leader_log, "one chosen log, every party");
     assert!(tier.replicas[0].counters().catch_up_requests >= 1);
     assert_eq!(tier.replicas[0].leader(), Some(NodeId(0)));
+    // The feedback of the replica reports the same.
+    let feedback = tier.replicas[0].feedback();
+    assert_eq!(feedback.leader, Some(NodeId(0)));
+    assert_eq!(feedback.learned, tier.replicas[0].counters().learned);
+    assert!(feedback.learned >= 3);
+    assert_eq!(
+        feedback.catch_up_requests,
+        tier.replicas[0].counters().catch_up_requests
+    );
+    assert_eq!(
+        feedback.has_read_basis,
+        tier.replicas[0].read_basis().is_some()
+    );
     // Every acceptor holds the chosen prefix: the replicas never voted, so the
     // decision is the acceptors' alone.
     for n in &tier.nodes {

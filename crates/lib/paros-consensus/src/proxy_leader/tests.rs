@@ -1,4 +1,5 @@
 use super::*;
+use crate::contract::feedback::ProxyInsight;
 use crate::journal::{Entry, LeaderUuid, Seq};
 use crate::membership::QuorumSystem;
 use crate::proposer::Round;
@@ -580,4 +581,95 @@ fn a_grid_round_is_fanned_out_and_folded_in_its_column() {
         matches!(out.as_slice(), [(Audience::Learners, Message::Commit { slot, .. })] if *slot == Slot(7)),
         "the full column decides"
     );
+}
+
+// ---- feedback (#1564 (journal controller, version 1)) -----------------------
+
+#[test]
+fn a_fresh_round_reports_no_silent_column() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), &plain(&majority(&[0, 1, 2])), Limits::DEFAULT);
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    let _ = drain(&mut proxy);
+    let feedback = proxy.feedback();
+    assert_eq!(feedback.id, ProxyId(0));
+    assert_eq!(feedback.ballot, ballot(3, 0));
+    assert_eq!(feedback.open_rounds, 1);
+    assert_eq!(feedback.pool, vec![NodeId(0), NodeId(1), NodeId(2)]);
+    assert!(
+        feedback.insights.is_empty(),
+        "a round not sent again waits for nothing yet"
+    );
+}
+
+#[test]
+fn a_resent_round_reports_its_silent_members_and_a_blocked_column() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), &plain(&majority(&[0, 1, 2])), Limits::DEFAULT);
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    proxy.step(accepted(1, ballot(3, 0), 4, &cmd(4)));
+    assert!(proxy.tick().is_empty(), "nothing is evicted yet");
+    let _ = drain(&mut proxy);
+    let feedback = proxy.feedback();
+    assert_eq!(
+        feedback.insights,
+        vec![
+            ProxyInsight::ColumnSilent {
+                column: None,
+                silent: vec![NodeId(0), NodeId(2)],
+                resends: 1,
+            },
+            ProxyInsight::ColumnBlocked { column: None },
+        ]
+    );
+    // The two silent members answer: the round decides and closes.
+    proxy.step(accepted(2, ballot(3, 0), 4, &cmd(4)));
+    let feedback = proxy.feedback();
+    assert_eq!(feedback.decided, 1);
+    assert_eq!(feedback.open_rounds, 0);
+    assert!(feedback.insights.is_empty(), "no open round, no insight");
+}
+
+#[test]
+fn a_member_silent_in_every_resent_round_does_not_block_a_column_that_decides_without_it() {
+    let mut proxy = ProxyLeader::new(
+        ProxyId(0),
+        &plain(&majority(&[0, 1, 2, 3, 4])),
+        Limits::DEFAULT,
+    );
+    let b = ballot(3, 0);
+    proxy.step(delegation(0, 0, b, 4, cmd(4)));
+    proxy.step(delegation(0, 0, b, 5, cmd(5)));
+    proxy.step(accepted(1, b, 4, &cmd(4)));
+    proxy.step(accepted(2, b, 4, &cmd(4)));
+    proxy.step(accepted(3, b, 5, &cmd(5)));
+    proxy.step(accepted(4, b, 5, &cmd(5)));
+    assert!(proxy.tick().is_empty(), "nothing is evicted yet");
+    let _ = drain(&mut proxy);
+    let feedback = proxy.feedback();
+    assert_eq!(feedback.open_rounds, 2);
+    assert_eq!(
+        feedback.insights,
+        vec![ProxyInsight::ColumnSilent {
+            column: None,
+            silent: vec![NodeId(0)],
+            resends: 1,
+        }],
+        "only node 0 is silent in both rounds, and four members are a quorum"
+    );
+}
+
+#[test]
+fn an_evicted_round_and_a_relayed_nack_are_counted_in_the_feedback() {
+    let limits = Limits {
+        proxy_retention: 1,
+        ..Limits::DEFAULT
+    };
+    let mut proxy = ProxyLeader::new(ProxyId(0), &plain(&majority(&[0, 1, 2])), limits);
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    let _ = proxy.tick();
+    let _ = proxy.tick();
+    let _ = drain(&mut proxy);
+    let feedback = proxy.feedback();
+    assert_eq!(feedback.expired, proxy.counters().expired);
+    assert_eq!(feedback.expired, 1);
+    assert_eq!(feedback.relayed_nacks, proxy.counters().relayed_nacks);
 }

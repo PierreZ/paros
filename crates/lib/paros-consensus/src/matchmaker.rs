@@ -510,6 +510,38 @@ impl Matchmaker {
         &self.set
     }
 
+    /// What this matchmaker reports about `journal`, as plain data
+    /// ([`crate::contract::feedback`]; #1564 (journal controller, version 1)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn feedback(&self, journal: JournalId) -> crate::contract::feedback::MatchmakerFeedback {
+        let feedback = crate::contract::feedback::MatchmakerFeedback {
+            id: self.id(),
+            set: self.set().clone(),
+            active: self.phase() == MatchmakerPhase::Active,
+            gc_watermark: self.gc_watermark(journal),
+            effective: self.effective(journal).cloned(),
+            highest: self.highest(journal),
+        };
+        if let Some(highest) = feedback.highest {
+            assert!(
+                highest >= feedback.gc_watermark,
+                "the highest registration sits at or above the watermark"
+            );
+        }
+        if feedback.active {
+            assert!(
+                feedback.set.contains(feedback.id),
+                "an active matchmaker is a member of its set"
+            );
+        }
+        feedback
+    }
+
     /// The set `hard_state` describes: generation 0's bootstrap set until a
     /// generation is durably activated or frozen.
     fn derive_set(&self) -> MatchmakerSet {

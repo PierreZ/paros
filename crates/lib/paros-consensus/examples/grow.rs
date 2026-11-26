@@ -60,6 +60,8 @@
 //!    segment they hold, and seal at its end.
 //! 9. The leader crashes in the full deployment. A new leader takes over,
 //!    and the matchmakers forget the configurations that no leader needs.
+//! 10. Each deployment reports its feedback as plain data. The leader sees
+//!     a crashed member miss its quorum windows.
 //!
 //! Further reading: Lamport, *Paxos Made Simple* (2001); Whittaker et al.,
 //! *Matchmaker Paxos* (2020) and *Scaling Replicated State Machines with
@@ -68,7 +70,7 @@
 
 mod common;
 
-use paros_consensus::contract::{MemStorage, Party};
+use paros_consensus::contract::{MemStorage, NodeInsight, Party};
 use paros_consensus::journal::{
     Command, Control, JournalIdentifier, LeaderUuid, Outcome, ReplicaSet, Segment, SegmentId, Seq,
 };
@@ -139,6 +141,7 @@ fn main() {
     let leader = hand_over_the_leadership(&mut cluster, leader);
     roll_a_segment(&mut cluster, leader);
     crash_in_the_full_deployment(&mut cluster, leader);
+    read_the_feedback(&mut cluster);
 
     println!("\neach node serves the ten records; each replica serves segment 0");
 }
@@ -652,7 +655,70 @@ fn crash_in_the_full_deployment(cluster: &mut Cluster, leader: NodeId) {
     println!("   node {leader} restarts as a follower; slot {last}: the last record");
 }
 
-// ---- helpers -----------------------------------------------------------------
+// ---- 10. feedback --------------------------------------------------------------
+
+/// Stage 10: each deployment reports its feedback as plain data, beside its
+/// counters (`feedback`). It is not part of a `Ready`, so a driver reads it
+/// at its own pace. A journal controller decides from it.
+fn read_the_feedback(cluster: &mut Cluster) {
+    println!("\n== 10. each deployment reports its feedback");
+    // `CheckQuorum` is on: each window of two ticks needs a Phase-2 quorum.
+    cluster.node(N1).set_election_timeout(2);
+    cluster.crash(N5);
+    for _ in 0..6 {
+        cluster.tick();
+    }
+    let feedback = cluster.node(N1).feedback();
+    let leading = feedback.leading.as_ref().expect("node 1 leads");
+    assert!(leading.settled);
+    let (floor, _) = leading.gc_effective.clone().expect("an effective floor");
+    let windows = leading
+        .missed
+        .iter()
+        .find(|(id, _)| *id == N5)
+        .map(|(_, windows)| *windows)
+        .expect("the leader counts the windows node 5 missed");
+    assert!(windows >= 2);
+    assert!(
+        feedback
+            .insights
+            .contains(&NodeInsight::MemberSilent { node: N5, windows })
+    );
+    println!("   node 1 leads, floor {floor}; node 5 missed {windows} windows in a row");
+
+    // The matchmakers report the configuration in force; it is the
+    // leader's.
+    let journal = cluster.journal_id(N1);
+    let reported = cluster.matchmaker(M1).feedback(journal);
+    assert!(reported.active);
+    assert_eq!(
+        reported.effective.map(|(_, config)| config).as_ref(),
+        Some(&feedback.acceptors)
+    );
+    // A proxy leader and a replica report what they did.
+    let proxy = cluster.proxy(ProxyId(0)).feedback();
+    assert_eq!(proxy.open_rounds, 0);
+    let replica = cluster.replica(R10).feedback();
+    assert!(replica.learned > 0);
+    println!(
+        "   matchmaker 1 reports the configuration of node 1; proxy 0 decided {}; replica 10 learned {}",
+        proxy.decided, replica.learned
+    );
+
+    // Node 5 is back: its next ack forgets the count.
+    cluster.restart(N5);
+    for _ in 0..4 {
+        cluster.tick();
+    }
+    let missed = cluster
+        .node(N1)
+        .feedback()
+        .leading
+        .expect("node 1 leads")
+        .missed;
+    assert!(missed.iter().all(|(id, _)| *id != N5), "{missed:?}");
+    println!("   node 5 restarts and acks: the leader forgets its count");
+}
 
 /// A majority configuration of `members`.
 /// The processes that `from` sent a message of `kind` to, in order.
