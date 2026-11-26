@@ -251,6 +251,7 @@ Each gave the result that its `checks.txt` expects, except the two bounded runs 
 | `retire-fence/crash_majority` | pass | 7.8 million | 16 min |
 | `retire-fence/retired_abandon` | pass | 9.4 million | 15 min |
 | `retire-fence/retired_abandon_live` | pass | 17.7 million | 53 min |
+| `retire-fence/two_controllers` | pass | 8.5 million | 9 min |
 | `zero-stall/carry_check` | pass | 10.2 million | 6 min |
 | `zero-stall/p212_check` | pass | 10.1 million | 8 min |
 | `zero-stall/carry_paper` | pass | 32.4 million | 20 min |
@@ -497,6 +498,23 @@ The control shows the livelock of the witness: the campaign stays open, so its l
 other campaign. With the rule, the campaign ends, and `Electable` still holds: an abandoned
 campaign only leaves its registrations where they are, as a slow campaign does. A node that
 rejoins while it runs keeps `Electable` and `Nameable` too.
+
+Two journal controllers (added on 2026-11-26 for open point 1 of #1564 (journal controller,
+version 1), `docs/architecture/04-8-journal-controller.md` §4.8.1). Two controllers with views of
+different ages can give two orders at once: one retires a node, and the other orders a
+reconfiguration that names it. No single party then keeps the operator's half of the contract,
+so these checks set `OperatorRule = FALSE`, with `allTomb`, the abandon of #1065, two
+matchmakers, three ballots and no restart.
+
+| Check | `Abandon` | Spec | Invariant or property | Result |
+|---|---|---|---|---|
+| `two_controllers_reach` | `TRUE` | `Spec` | `NoRetiredRefusal`: no matchmaker refuses a reconfiguration as naming a retired node | violation (the interleaving is reached) |
+| `two_controllers` | `TRUE` | `Spec` | `Electable` | pass (`long`, 8.5 million states, 9 min) |
+| `two_controllers_livelock` | `FALSE` | `LiveSpec` | `NoRetiredLivelock` | violation |
+| `two_controllers_live` | `TRUE` | `LiveSpec` | `NoRetiredLivelock` | pass (`long`) |
+
+So the interleaving costs a refused campaign and never safety: the matchmakers alone keep
+`Electable`, and the leader abandons the refused reconfiguration and is free to campaign again.
 
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.

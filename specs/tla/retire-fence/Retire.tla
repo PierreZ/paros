@@ -531,6 +531,12 @@ RetiredBlocked(b) ==
 \* leader can then campaign again (`Busy` holds only an open campaign).
 NoRetiredLivelock == \A b \in Ballots : []<>(~ RetiredBlocked(b))
 
+\* Not a real invariant. With OperatorRule FALSE (two journal controllers,
+\* #1564 (journal controller, version 1)), TLC must find a trace where one
+\* retires a node and a matchmaker then refuses the reconfiguration of the
+\* other that names it: the interleaving of open point 1 of #1564 is reached.
+NoRetiredRefusal == \A b \in Ballots : refused[b] = {}
+
 \* Not a real invariant. TLC must find a trace where a node retires: this
 \* shows that the model reaches a retirement.
 NoRetirement == retired = {}
