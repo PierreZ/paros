@@ -14,5 +14,6 @@ hold_any           violation  ci
 reach_hold_judge   violation  ci
 reach_hold_drop    violation  ci
 compact_kept       pass       ci
+compact_target     pass       ci
 compact_any        violation  ci
 reach_compact_kept violation  ci

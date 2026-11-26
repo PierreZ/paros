@@ -82,7 +82,7 @@
 (*           floor, the fixed point of `Replica::compaction_floor`: a      *)
 (*           retry above the floor that folds as a duplicate keeps the     *)
 (*           record that it reads. "any": a control, the `Compact` of      *)
-(*           `Truncation.tla`, which stops at any point below its target.  *)
+(*           `Truncation.tla`, which lands at any point up to its target.  *)
 (***************************************************************************)
 EXTENDS Truncation
 
@@ -528,9 +528,11 @@ NoLossAfterHeld == ~(held # {} /\ rlost > 0)
 \* of its replicas hold all of it. With `Count = "ever"`, a report of a
 \* replica that lost its disk since counts, and the mark comes with fewer.
 NoStaleMark == [][\A k \in Segs : (k \notin held /\ k \in held') => Cardinality(HoldsAll(k)') >= Need]_<<hvars, past, reported>>
-\* A node learned a `Truncate` whose target is not closed: a retry above
-\* the target reads a write below it, so the compaction stops below.
+\* A floor that a `Truncate` raised stands on a fixed point strictly below
+\* the target, under a point that is not closed: a `Compact` stopped
+\* below its target, and the retries lowered it further.
 NoCompactKept == ~\E a \in Acceptors, t \in Slots :
-                    learned[a][t] \in Truncations /\ PrefixChosen(t + 1)
-                    /\ ~Closed(CompactTarget(t))
+                    /\ learned[a][t] \in Truncations /\ PrefixChosen(t + 1)
+                    /\ 0 < floor[a] /\ floor[a] < CompactTarget(t)
+                    /\ \E g \in (floor[a] + 1)..CompactTarget(t) : ~Closed(g)
 =============================================================================
