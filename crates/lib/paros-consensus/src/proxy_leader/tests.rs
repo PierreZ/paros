@@ -671,5 +671,53 @@ fn an_evicted_round_and_a_relayed_nack_are_counted_in_the_feedback() {
     let feedback = proxy.feedback();
     assert_eq!(feedback.expired, proxy.counters().expired);
     assert_eq!(feedback.expired, 1);
+    assert_eq!(feedback.relayed_nacks, 0, "no Nack yet");
+    // A member refuses an open round: the proxy relays it to the leader.
+    proxy.step(delegation(0, 0, ballot(3, 0), 5, cmd(5)));
+    let _ = drain(&mut proxy);
+    proxy.step(Message::Nack {
+        from: NodeId(2),
+        ballot: ballot(3, 0),
+        slot: Slot(5),
+    });
+    let _ = drain(&mut proxy);
+    let feedback = proxy.feedback();
+    assert_eq!(feedback.relayed_nacks, 1, "the relayed Nack is counted");
     assert_eq!(feedback.relayed_nacks, proxy.counters().relayed_nacks);
+}
+
+#[test]
+fn a_resent_grid_round_reports_its_own_column() {
+    // A 2 x 2 grid, members in row order: slot 6 is column 0 (nodes 0 and
+    // 2), slot 7 is column 1 (nodes 1 and 3).
+    let grid = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::grid(2, 2),
+    );
+    let mut proxy = ProxyLeader::new(ProxyId(0), &plain(&grid), Limits::DEFAULT);
+    let b = ballot(3, 0);
+    proxy.step(delegation(0, 0, b, 6, cmd(6)));
+    proxy.step(delegation(0, 0, b, 7, cmd(7)));
+    proxy.step(accepted(0, b, 6, &cmd(6)));
+    proxy.step(accepted(1, b, 7, &cmd(7)));
+    assert!(proxy.tick().is_empty(), "nothing is evicted yet");
+    let _ = drain(&mut proxy);
+    assert_eq!(
+        proxy.feedback().insights,
+        vec![
+            ProxyInsight::ColumnSilent {
+                column: Some(0),
+                silent: vec![NodeId(2)],
+                resends: 1,
+            },
+            ProxyInsight::ColumnBlocked { column: Some(0) },
+            ProxyInsight::ColumnSilent {
+                column: Some(1),
+                silent: vec![NodeId(3)],
+                resends: 1,
+            },
+            ProxyInsight::ColumnBlocked { column: Some(1) },
+        ],
+        "each column names its own silent member; a full column needs both"
+    );
 }

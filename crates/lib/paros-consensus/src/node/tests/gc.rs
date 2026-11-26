@@ -327,7 +327,9 @@ fn configurations_in_force_drop_the_prior_ones_once_the_floor_is_effective() {
     let (prior, current) = nodes[0].configs_in_force().expect("node 0 leads");
     assert_eq!(*current, cfg(&[0, 1]));
     assert_eq!(prior, vec![&cfg(&[0, 1, 2])]);
-    let leading = nodes[0].feedback().leading.expect("node 0 leads");
+    let feedback = nodes[0].feedback();
+    assert!(feedback.heard, "a leader with matchmakers heard its belief");
+    let leading = feedback.leading.expect("node 0 leads");
     assert_eq!(
         leading.prior,
         vec![cfg(&[0, 1, 2])],

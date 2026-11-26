@@ -1319,28 +1319,14 @@ impl ReplicaNode {
 
     /// What this replica reports about itself, as plain data
     /// ([`crate::contract::feedback`]; #1564 (journal controller, version 1)).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants fails: a programmer error,
-    /// never an operating condition.
     #[must_use]
     pub fn feedback(&self) -> crate::contract::feedback::ReplicaFeedback {
-        let feedback = crate::contract::feedback::ReplicaFeedback {
+        crate::contract::feedback::ReplicaFeedback {
             leader: self.leader(),
             has_read_basis: self.read_basis().is_some(),
             learned: self.counters.learned,
             catch_up_requests: self.counters.catch_up_requests,
-        };
-        assert!(
-            feedback.learned == self.counters().learned,
-            "the reported count is the replica's own"
-        );
-        assert!(
-            feedback.catch_up_requests == self.counters().catch_up_requests,
-            "the reported requests are the replica's own"
-        );
-        feedback
+        }
     }
 
     /// The bytes of the records this replica holds in memory, from its

@@ -88,7 +88,10 @@ pub enum NodeInsight {
     /// The last leadership of this node ended on a `CheckQuorum` window
     /// that closed without a Phase-2 quorum.
     QuorumWindowLost,
-    /// The leader saw `node` miss its last `windows` windows in a row.
+    /// The leader saw `node` miss its last `windows` windows in a row, one
+    /// or more. The node concludes no threshold: a member whose ack comes
+    /// later than one window is counted too, so a reader sets its own bound
+    /// (the journal controller's `Policy::silent_windows`).
     MemberSilent {
         /// The member.
         node: NodeId,
@@ -170,7 +173,10 @@ pub struct MatchmakerFeedback {
     pub active: bool,
     /// The GC watermark of the journal.
     pub gc_watermark: Ballot,
-    /// The effective configuration of the journal and its ballot.
+    /// The highest-ballot reconfiguration this matchmaker holds for the
+    /// journal, and its ballot. One answer can be stale: the effective
+    /// configuration is the maximum over a matchmaker quorum, so a reader
+    /// takes the maximum over the answers it holds.
     pub effective: Option<(Ballot, AcceptorConfig)>,
     /// The highest ballot registered for the journal.
     pub highest: Option<Ballot>,

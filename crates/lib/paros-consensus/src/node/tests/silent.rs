@@ -134,6 +134,10 @@ fn the_feedback_of_a_leader_reports_its_leadership_and_its_silent_member() {
         beat_without(&mut nodes, Some(NodeId(2)));
     }
     let feedback = nodes[0].feedback();
+    assert!(
+        !feedback.heard,
+        "a node with no matchmakers keeps its bootstrap belief"
+    );
     assert_eq!(feedback.id, NodeId(0));
     assert_eq!(feedback.leader, Some(NodeId(0)));
     assert_eq!(feedback.ballot, nodes[0].ballot());

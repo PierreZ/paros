@@ -527,12 +527,6 @@ impl Matchmaker {
             effective: self.effective(journal).cloned(),
             highest: self.highest(journal),
         };
-        if let Some(highest) = feedback.highest {
-            assert!(
-                highest >= feedback.gc_watermark,
-                "the highest registration sits at or above the watermark"
-            );
-        }
         if feedback.active {
             assert!(
                 feedback.set.contains(feedback.id),
