@@ -37,13 +37,31 @@
 (*   FloorTo "prefix": the floor rises to the end of segment k only when   *)
 (*           every segment up to k is held. "any": a control, to the end   *)
 (*           of any held segment, over a segment before it that is not.   *)
+(*   HoldBy  "decided": the floor at a held segment is a decided command, *)
+(*           `Hold` (a value of `HoldCmds`, `HoldOf` names its segment):  *)
+(*           the leader proposes it once its tally marked the segment     *)
+(*           `Held`, and an acceptor raises its floor when its fold       *)
+(*           reaches the `Hold`. So every node judges a retry of a write  *)
+(*           in a held segment from the log alone (`Judge`), the same     *)
+(*           way. "tally": a control, an acceptor raises its floor as     *)
+(*           soon as the tally marks the segment `Held`; a retry is       *)
+(*           judged from the floor of the node, and two nodes answer it   *)
+(*           two ways.                                                    *)
+(*   HoldWhen "held": the leader proposes `Hold` for segment k only when  *)
+(*           its tally marked k (and, with `FloorTo = "prefix"`, every    *)
+(*           segment before k) `Held`. "any": a control, it proposes a    *)
+(*           `Hold` at any time, so a floor drops records no replica      *)
+(*           holds.                                                       *)
+(*   Judges  the nodes that judge a retry of a write (`Judge`); none in    *)
+(*           the checks that do not look at retries.                       *)
 (*   HeldFloorNodes  the acceptors that raise their floor at `Held`; the   *)
 (*           others reach it only with a jump (`TrimTo`). Every acceptor   *)
 (*           but in the checks that must see a jump.                       *)
 (***************************************************************************)
 EXTENDS Truncation
 
-CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes
+CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes,
+          HoldOf, HoldBy, HoldWhen, Judges
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
@@ -51,13 +69,16 @@ Segs == 1..(Cardinality(Rolls) + 1)
 ASSUME RepOf \in [Segs -> SUBSET Replicas] /\ Replicas \cap Acceptors = {}
 ASSUME F \in Nat /\ HeldAt \in {"f_plus_one", "f"} /\ HeldEnd \in {"chain", "log"}
 ASSUME FloorTo \in {"prefix", "any"} /\ HeldFloorNodes \subseteq Acceptors
+ASSUME HoldOf \in [HoldCmds -> Segs] /\ HoldBy \in {"decided", "tally"}
+ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
           held,   \* the segments marked `Held`
-          rlost   \* how many replicas lost their disk
+          rlost,  \* how many replicas lost their disk
+          answers \* the retries judged: a node, a fold point, a position
 
-seg == <<rhold, chain, held, rlost>>
+seg == <<rhold, chain, held, rlost, answers>>
 hvars == <<vars, seg>>
 
 HeldTypeOK ==
@@ -66,6 +87,8 @@ HeldTypeOK ==
   /\ chain \in [Segs -> 0..NS]
   /\ held \subseteq Segs
   /\ rlost \in 0..F
+  /\ answers \subseteq [node : Acceptors, at : Slots, pos : 0..NS,
+                        ans : {"truncated", "held", "dup"}, has : BOOLEAN]
 
 HeldInit ==
   /\ Init
@@ -73,6 +96,7 @@ HeldInit ==
   /\ chain = [k \in Segs |-> 0]
   /\ held = {}
   /\ rlost = 0
+  /\ answers = {}
 
 -----------------------------------------------------------------------------
 (* The segments of the chosen log *)
@@ -118,7 +142,7 @@ CanCopy(r, s) ==
 \* only the chosen prefix of its own segment.)
 Copy(r) ==
   /\ rhold' = [rhold EXCEPT ![r] = @ \cup {s \in Slots : CanCopy(r, s)}]
-  /\ UNCHANGED <<vars, chain, held, rlost>>
+  /\ UNCHANGED <<vars, chain, held, rlost, answers>>
 
 \* A node applied the `Roll` that ends segment k and publishes the end in
 \* the chain (R3, R5). Every writer writes the same value, a function of
@@ -128,7 +152,7 @@ Copy(r) ==
 \* `act_vote`).
 Publish(k) ==
   /\ chain' = [chain EXCEPT ![k] = LogEnd(k)]
-  /\ UNCHANGED <<vars, rhold, held, rlost>>
+  /\ UNCHANGED <<vars, rhold, held, rlost, answers>>
 
 \* The replicas that `Held` needs.
 Need == IF HeldAt = "f_plus_one" THEN F + 1 ELSE F
@@ -139,20 +163,39 @@ MarkHeld(k) ==
   /\ End(k) > 0
   /\ Cardinality({r \in RepOf[k] : SegSlots(k, End(k)) \subseteq rhold[r]}) >= Need
   /\ held' = held \cup {k}
-  /\ UNCHANGED <<vars, rhold, chain, rlost>>
+  /\ UNCHANGED <<vars, rhold, chain, rlost, answers>>
 
 \* The floor that the held segment k gives: its end, when every segment up
 \* to k is held (with `FloorTo = "any"`, whatever the segments before it).
 \* It is 0 otherwise, and then HeldFloor changes nothing.
 HeldEndOf(k) ==
-  IF k \in held /\ (FloorTo = "any" \/ \A j \in 1..k : j \in held) THEN End(k) ELSE 0
+  IF HoldBy = "decided" THEN End(k)
+  ELSE IF k \in held /\ (FloorTo = "any" \/ \A j \in 1..k : j \in held) THEN End(k) ELSE 0
+
+\* Acceptor a folded a `Hold` of segment k: it learned the `Hold` at some
+\* slot t and holds every slot up to t.
+FoldedHold(a, k) ==
+  \E t \in Slots :
+    /\ learned[a][t] \in HoldCmds
+    /\ HoldOf[learned[a][t]] = k
+    /\ \A s \in 0..t : Holds(a, s)
+
+\* Every `Hold` that a leader proposed names a segment that its tally
+\* marked `Held` (with `FloorTo = "prefix"`, every segment up to it). A
+\* re-proposal of a `Hold` by a later leader keeps it: `held` only grows.
+HoldProposedHeld ==
+  \A m \in msgs :
+    m.type = "2a" /\ m.val \in HoldCmds =>
+      /\ HoldOf[m.val] \in held
+      /\ FloorTo = "prefix" => \A j \in 1..HoldOf[m.val] : j \in held
 
 \* Acceptor a raises its floor to the end of the held segment k, and drops
 \* the records below it in the same write (`WriteOp::Truncate`). A floor
 \* never goes down.
 HeldFloor(a, k) ==
   LET f == IF HeldEndOf(k) > floor[a] THEN HeldEndOf(k) ELSE floor[a]
-  IN /\ floor' = [floor EXCEPT ![a] = f]
+  IN /\ HoldBy = "decided" => FoldedHold(a, k)
+     /\ floor' = [floor EXCEPT ![a] = f]
      /\ dfloor' = [dfloor EXCEPT ![a] = f]
      /\ vote' = [vote EXCEPT ![a] = DropVotes(a, f)]
      /\ learned' = [learned EXCEPT ![a] = DropLearned(a, f)]
@@ -163,10 +206,43 @@ LoseReplica(r) ==
   /\ rlost < F
   /\ rlost' = rlost + 1
   /\ rhold' = [rhold EXCEPT ![r] = {}]
-  /\ UNCHANGED <<vars, chain, held>>
+  /\ UNCHANGED <<vars, chain, held, answers>>
+
+\* The slot of the write at position p, a position below `next_seq` after
+\* slot t.
+SlotOf(p, t) == CHOOSE s \in 0..t : ChosenVal(s) \in Commands /\ Pos(s) = p
+
+\* The answer to a retry of the write at position p, judged at the fold of
+\* slot t. Below `first_seq` it is truncated. In a held segment it is held:
+\* the reader asks the replicas of the segment. Else the log holds the write
+\* there, and the retry is a duplicate.
+Answer(n, t, p) ==
+  IF p < FirstSeq(t) THEN "truncated"
+  ELSE IF HoldBy = "decided"
+          /\ \E u \in 0..t : ChosenVal(u) \in HoldCmds /\ SlotOf(p, t) < End(HoldOf[ChosenVal(u)])
+       THEN "held"
+  ELSE IF HoldBy = "tally" /\ SlotOf(p, t) < floor[n] THEN "held"
+  ELSE "dup"
+
+\* Node n judges a retry of the write at position p when its fold reaches
+\* slot t: it learned every slot up to t and none above it. The retry is
+\* chosen at slot t + 1, so that slot is not chosen yet: a retry already
+\* chosen below a floor is a write of the log, and the drop keeps the
+\* record that it reads (`Replica::compaction_target`). The answer of a
+\* duplicate needs the record of the write (`has`).
+Judge(n, t, p) ==
+  /\ PrefixChosen(t + 1)
+  /\ t + 1 \in Slots => ~IsChosen(t + 1)
+  /\ FirstUnchosen(n) = t + 1
+  /\ p < Pos(t + 1)
+  /\ LET s == SlotOf(p, t)
+     IN answers' = answers \cup {[node |-> n, at |-> t, pos |-> p, ans |-> Answer(n, t, p),
+                                   has |-> learned[n][s] # None \/ Readable(vote[n][s])]}
+  /\ UNCHANGED <<vars, rhold, chain, held, rlost>>
 
 HeldNext ==
-  \/ Next /\ UNCHANGED seg
+  \/ Next /\ UNCHANGED seg /\ (HoldWhen = "held" => HoldProposedHeld')
+  \/ \E n \in Judges, t \in Slots, p \in 0..NS : Judge(n, t, p)
   \/ \E r \in Replicas : Copy(r) \/ LoseReplica(r)
   \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in HeldFloorNodes : HeldFloor(a, k)
 
@@ -232,6 +308,15 @@ ChainTrue == \A k \in Segs : chain[k] # 0 => chain[k] = LogEnd(k)
 \* A replica holds only chosen slots of its own segments.
 ReplicaTrue == \A r \in Replicas, s \in Slots : s \in rhold[r] => PrefixChosen(s + 1) /\ r \in RepOf[SegAt(s)]
 
+\* One answer to a retry: every node that judged a retry of position p at
+\* the fold of slot t gave the same answer. The journal fold is the same on
+\* every node, so a retry gets one outcome.
+OneAnswer == \A x, y \in answers : x.at = y.at /\ x.pos = y.pos => x.ans = y.ans
+
+\* A duplicate is judged on the record: the node that answers it holds the
+\* write.
+DupHasRecord == \A x \in answers : x.ans = "dup" => x.has
+
 \* Reachability controls: each must be violated.
 \* A segment is held.
 NoHeld == held = {}
@@ -254,6 +339,11 @@ NoLaggardWin == ~\E k \in held :
                   /\ floor[Owner[NB]] >= chain[k]
 \* A leader wins Phase 1 from at or above a held floor.
 NoWinAboveHeld == ~\E b \in Ballots, k \in held : phase[b] = "p2" /\ chain[k] > 0 /\ from[b] >= chain[k]
+\* A retry is answered held.
+\* A node folded a `Hold` and dropped the held segment: its floor is at the
+\* end (with `HoldBy = "decided"`, only a learner folds a `Hold`).
+NoHoldDrop == ~\E k \in held, a \in Acceptors : chain[k] > 0 /\ floor[a] >= chain[k]
+NoJudgeHeld == ~\E x \in answers : x.ans = "held"
 \* A replica lost its disk after a segment was held.
 NoLossAfterHeld == ~(held # {} /\ rlost > 0)
 =============================================================================

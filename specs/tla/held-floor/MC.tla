@@ -4,7 +4,7 @@ EXTENDS HeldFloor, TLC
 
 \* The acceptor and replica names, the truncation value and the `Roll`
 \* value: model values that the configurations set.
-CONSTANTS a1, a2, a3, r1, r2, roll2, roll3
+CONSTANTS a1, a2, a3, r1, r2, roll2, roll3, hold1
 
 \* A majority of the acceptors, the same for every slot.
 Majorities == {Q \in SUBSET Acceptors : 2 * Cardinality(Q) > Cardinality(Acceptors)}
@@ -19,6 +19,10 @@ OwnOne == [b \in Ballots |-> a1]
 
 \* No truncation value.
 NoCut == [c \in {} |-> 0]
+
+\* No `Hold` value, or one, `hold1`, the floor at the held segment 1.
+NoHold == [h \in {} |-> 1]
+Hold1 == [h \in {hold1} |-> 1]
 
 \* One `Roll`, `roll2`, which opens segment 2; or two, `roll2` and `roll3`.
 Roll2 == [v \in {roll2} |-> 2]
@@ -37,6 +41,8 @@ Reps1 == [k \in Segs |-> IF k < Cardinality(Segs) THEN {r1} ELSE {}]
 Planned(script) == \A m \in msgs : m.type = "2a" /\ m.val \in Proposals => m.val \in script[m.slot]
 RollPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE Rolls])
 RollPlan3 == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN {roll2} ELSE {roll3}])
+\* `HoldPlan`: the command, `roll2`, then `hold1`.
+HoldPlan == Planned([s \in Slots |-> IF s = 0 THEN Commands ELSE IF s = 1 THEN Rolls ELSE HoldCmds])
 CmdPlan3 == Planned([s \in Slots |-> IF s = 1 THEN Rolls ELSE Commands])
 
 \* The two replicas of segment 1 are alike.
