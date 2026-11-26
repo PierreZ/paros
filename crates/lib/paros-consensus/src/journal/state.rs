@@ -62,6 +62,16 @@
 //!   from the slot after the `Roll` ([`Outcome::Rolled`]). Any other `Roll`
 //!   changes nothing ([`Outcome::RollIgnored`]). It is the same under both
 //!   writer modes: a segment is a range of the log, not a right to write.
+//! - **`Hold(segment, end, next_seq)`** ([`Command::Hold`], R7 and D9 of
+//!   §4.7) extends the held prefix ([`JournalState::held`]): it is valid iff
+//!   it names the segment right after the held prefix, that segment is
+//!   sealed, and its end and position lie past the held prefix and inside
+//!   the fold ([`Outcome::HeldTo`]). Any other `Hold` changes nothing
+//!   ([`Outcome::HoldIgnored`]). Once a segment is held, a single-writer
+//!   retry of a write inside the held prefix is [`Outcome::Held`]: the
+//!   replicas of its segment hold it, and the acceptors may drop it. The
+//!   answer is a function of the chosen prefix, so every node gives it
+//!   (`OneAnswer` of `specs/tla/held-floor-hold/`).
 //!
 //! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
 //! carried by the store's sealed state and a trim-point jump, and never
@@ -79,7 +89,7 @@
 //! every transition.
 
 use crate::journal::{
-    Command, Control, Entry, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+    Command, Control, Entry, Hold, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
 };
 use crate::types::Slot;
 
@@ -134,6 +144,12 @@ pub struct JournalState {
     /// from its own fold (R4c, R4d), never from the chain.
     #[cfg_attr(feature = "serde", serde(default))]
     pub replicas: Option<ReplicaSet>,
+    /// The held prefix (R7, D9 of §4.7): the last valid [`Hold`], whose
+    /// segment and every segment before it are held. `None` until the first
+    /// valid `Hold`. A function of the chosen prefix like the rest of the
+    /// state, so the floor seals it and a trim-point jump carries it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub held: Option<Hold>,
 }
 
 /// What a client learns of a journal's state (#241): the [`JournalState`]
@@ -200,6 +216,16 @@ pub enum Outcome {
     /// A `Roll` that does not name the tail plus one: nothing moved. The
     /// segment is the tail it was judged against.
     RollIgnored(Segment),
+    /// A valid `Hold`: the held prefix after it.
+    HeldTo(Hold),
+    /// A `Hold` that does not extend the held prefix: nothing moved. It
+    /// names the held prefix it was judged against.
+    HoldIgnored(Option<Hold>),
+    /// The write asked for a position inside the held prefix: its segment
+    /// is held, so the replicas of the segment answer for it, and the
+    /// acceptors may have dropped the records there. Nothing moved; the
+    /// view is the one it was judged against.
+    Held(JournalView),
     /// A `Noop`: nothing moved.
     Noop,
 }
@@ -265,6 +291,15 @@ impl JournalState {
     ) -> Outcome {
         if entry.seq < self.first_seq {
             return Outcome::Truncated(self.view());
+        }
+        if self.held.is_some_and(|held| entry.seq < held.next_seq) {
+            // Checked before the lookup: the acceptors may have dropped the
+            // records of a held segment, so the log no longer answers here.
+            assert!(
+                entry.seq < self.next_seq,
+                "the held prefix lies below the next position"
+            );
+            return Outcome::Held(self.view());
         }
         if entry.seq < self.next_seq {
             // A retry is answered from the log itself: exactly the write
@@ -337,6 +372,8 @@ impl JournalState {
             | Outcome::WrongMode(_)
             | Outcome::Duplicate { .. }
             | Outcome::RollIgnored(_)
+            | Outcome::HoldIgnored(_)
+            | Outcome::Held(_)
             | Outcome::Noop => {
                 assert!(*self == *before, "a refused or no-op command moves nothing");
             }
@@ -392,18 +429,56 @@ impl JournalState {
                 );
                 assert!(self.term == before.term, "a Roll keeps the term");
             }
+            Outcome::HeldTo(_) => {}
         }
+        self.assert_held(before, outcome);
         // The refusals name the view they were judged against.
         if let Outcome::Refused(judged)
         | Outcome::Truncated(judged)
         | Outcome::LeaderRefused(judged)
         | Outcome::TruncateRefused(judged)
-        | Outcome::WrongMode(judged) = outcome
+        | Outcome::WrongMode(judged)
+        | Outcome::Held(judged) = outcome
         {
             assert!(
                 *judged == before.view(),
                 "a refusal names the state it was judged against"
             );
+        }
+    }
+
+    /// The held prefix's postconditions: it only grows, only a valid `Hold`
+    /// moves it, and an ignored `Hold` names the prefix it was judged
+    /// against.
+    fn assert_held(&self, before: &Self, outcome: &Outcome) {
+        if self.held != before.held {
+            assert!(
+                matches!(outcome, Outcome::HeldTo(_)),
+                "only a valid Hold moves the held prefix"
+            );
+            assert!(
+                before
+                    .held
+                    .is_none_or(|was| self.held.is_some_and(|now| now.segment > was.segment)),
+                "the held prefix never goes back"
+            );
+        }
+        if let Outcome::HoldIgnored(judged) = outcome {
+            assert!(
+                *judged == before.held,
+                "an ignored Hold names the held prefix it was judged against"
+            );
+        }
+        if let Outcome::HeldTo(hold) = outcome {
+            assert!(
+                self.held == Some(*hold),
+                "a valid Hold reports the held prefix after it"
+            );
+            assert!(
+                self.view() == before.view() && self.segment == before.segment,
+                "a Hold moves no position, no leader and no segment"
+            );
+            assert!(self.term == before.term, "a Hold keeps the term");
         }
     }
 
@@ -477,6 +552,46 @@ impl JournalState {
         Outcome::Rolled(self.segment)
     }
 
+    /// A `Hold`: valid iff it names the segment right after the held prefix
+    /// ([`SegmentId::FIRST`] when none is held), that segment is sealed (it
+    /// lies below the tail), its end lies past the held prefix and at or
+    /// below the start of the tail, and its position lies at or past the
+    /// held prefix and at or below `next_seq`. The rule that the held
+    /// segments are a prefix is `FloorTo = "prefix"` of
+    /// `specs/tla/held-floor/` (its control `floor_any` loses a slot); the
+    /// fold judges it, so a `Hold` that a leader proposed out of order
+    /// changes nothing.
+    fn apply_hold(&mut self, hold: Hold) -> Outcome {
+        let expected = self
+            .held
+            .map_or(SegmentId::FIRST, |h| h.segment.successor());
+        let after_end = self.held.map_or(Slot(0), |h| h.end);
+        let after_seq = self.held.map_or(Seq(0), |h| h.next_seq);
+        let valid = hold.segment == expected
+            && hold.segment < self.segment.id
+            && hold.end > after_end
+            && hold.end <= self.segment.start
+            && hold.next_seq >= after_seq
+            && hold.next_seq <= self.next_seq;
+        if !valid {
+            return Outcome::HoldIgnored(self.held);
+        }
+        let before = self.held;
+        self.held = Some(hold);
+        assert!(
+            before.is_none_or(|was| hold.segment == was.segment.successor()),
+            "a valid Hold extends the held prefix by one segment"
+        );
+        assert!(hold.segment < self.segment.id, "a held segment is sealed");
+        // Segment `k` ends past slot `k`: the end of the first lies past 0,
+        // and each end lies past the one before it, so no guard asks it.
+        assert!(
+            hold.end.0 > hold.segment.0,
+            "a held segment ends past its own id"
+        );
+        Outcome::HeldTo(hold)
+    }
+
     /// The verdict on `command` under `mode`, the state moved accordingly.
     ///
     /// Proved in simulation (#241): a single-writer journal that takes an
@@ -494,6 +609,7 @@ impl JournalState {
         match (mode, command) {
             (_, Command::Control(Control::Noop)) => Outcome::Noop,
             (_, Command::Roll(roll)) => self.apply_roll(slot, roll),
+            (_, Command::Hold(hold)) => self.apply_hold(*hold),
             (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
                 Outcome::WrongMode(self.view())
             }
@@ -663,6 +779,16 @@ impl JournalState {
             && self.leader.is_none_or(LeaderUuid::is_set)
             && (self.segment.id == SegmentId::FIRST) == (self.segment.start == Slot(0))
             && self.segment.start.0 >= self.segment.id.0
+            && self.held.is_none_or(|held| self.holds(held))
+    }
+
+    /// Whether `held` fits this state as its held prefix: a sealed segment,
+    /// whose end and position the fold reached.
+    fn holds(&self, held: Hold) -> bool {
+        held.segment < self.segment.id
+            && held.end <= self.segment.start
+            && held.end.0 > held.segment.0
+            && held.next_seq <= self.next_seq
     }
 
     /// The state's own ordering.
@@ -672,7 +798,9 @@ impl JournalState {
     /// If `first_seq` passed `next_seq`, or a journal with a term has no
     /// leader (or the reverse), or the unset uuid leads, or the tail segment
     /// does not fit its id (the first segment starts at slot 0, and segment
-    /// `k` at slot `k` or later: each `Roll` before it took a slot).
+    /// `k` at slot `k` or later: each `Roll` before it took a slot), or the
+    /// held prefix does not fit the state (a held segment is sealed, and its
+    /// end and position lie inside the fold).
     pub fn assert_invariants(&self) {
         assert!(
             self.first_seq <= self.next_seq,
@@ -694,6 +822,21 @@ impl JournalState {
             self.segment.start.0 >= self.segment.id.0,
             "each segment before the tail ended at a Roll of its own slot"
         );
+        if let Some(held) = self.held {
+            assert!(held.segment < self.segment.id, "a held segment is sealed");
+            assert!(
+                held.end <= self.segment.start,
+                "a held segment ends at or before the tail"
+            );
+            assert!(
+                held.end.0 > held.segment.0,
+                "a held segment ends past the Roll of each segment before it"
+            );
+            assert!(
+                held.next_seq <= self.next_seq,
+                "the held prefix lies below the next position"
+            );
+        }
     }
 }
 

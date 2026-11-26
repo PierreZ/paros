@@ -206,7 +206,18 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   (`collector::HeldTally`, wired in `node/held.rs`); `AcceptorConfig::is_held_by` is the one
   comparison with `F`; the end is in the chain once the node's own publish completed
   (`Publisher::is_published`). `ColocatedNode::held_segments` lists the segments marked `Held`.
-  Not built yet: the `Hold` that a leader proposes for them, and its drop. The tally never forgets a sender that reported, and keeps a report
+  A leader proposes a `Hold` for each segment that its tally marks, in segment order
+  (`node/held.rs`, `propose_holds`), and the fold judges it (`JournalState::apply`): a `Hold` is
+  valid only for the segment right after the held prefix, over a sealed segment, so the held
+  segments of the log are a prefix (`FloorTo = "prefix"`, whose control `floor_any` loses a
+  slot). A `Hold` carries the end of its segment and the next position at its `Roll`, from the
+  leader's fold; the fold checks that both lie past the held prefix and inside what it reached
+  (`JournalState::held`). The model names only the segment, and reads the end from the chain.
+  Once a segment is held, a single-writer retry of a write below that position is
+  `Outcome::Held`, judged before the log is asked: the write's slot is below the end exactly
+  when its position is below the position at the `Roll`, because positions follow the slot
+  order (this equivalence is a reading of this step). Not built yet: the drop of a held
+  segment at the acceptors. The tally never forgets a sender that reported, and keeps a report
   from the seal, before the chain publishes the end. Its safety rests on a fault model that the
   tally cannot see and the deployment must keep: at most `F` replicas are down at one time, where
   a replica is down from the loss of a segment that it held whole until it copies the segment
@@ -216,10 +227,12 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   passes with three replicas, `F = 1`, a tally that counts every reporter, and losses bounded at
   one time. Its control `held_ever_down` (`F + 1` replicas down at one time) loses a record, and
   `reach_held_stale` reaches a mark of `Held` while fewer than `F + 1` replicas hold the segment,
-  on the report of a replica that lost its disk since. **Open** (step 6): `F` is the `f` of the
-  configuration that the node believes in force when it judges, not of the configurations
+  on the report of a replica that lost its disk since. `F` is the `f` of the configuration
+  that the leader believes in force when it judges (`judge_held`), not of the configurations
   that chose the slots of the segment; for a grid, `tolerated_failures` is the availability `f`
-  (the minimum over the two phases). The `Hold` step decides which configuration counts.
+  (the minimum over the two phases). Pierre confirmed `F = f` on 2026-11-26 (D8); which
+  configuration counts is the reading of this step. A segment held under one `f` stays held when
+  a later configuration raises `f`: only a heal (R8) adds copies.
   **Open** (step 6):
   a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
   holds every slot that a decided `Truncate` did not release, but the rule that counts it needs

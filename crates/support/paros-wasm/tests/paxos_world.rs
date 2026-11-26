@@ -119,6 +119,7 @@ fn applied_text(world: &World, node: u64) -> Vec<String> {
             }
             Command::Control(control) => format!("{}:{control:?}", slot.0),
             Command::Roll(roll) => format!("{}:{roll:?}", slot.0),
+            Command::Hold(hold) => format!("{}:{hold:?}", slot.0),
         })
         .collect()
 }

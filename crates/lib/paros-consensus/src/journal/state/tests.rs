@@ -1,6 +1,6 @@
 use super::{JournalState, Outcome, WriterMode};
 use crate::journal::{
-    Command, Control, Entry, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+    Command, Control, Entry, Hold, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
 };
 use crate::types::{NodeId, Slot, Value};
 
@@ -416,4 +416,211 @@ fn a_roll_names_or_keeps_the_replicas_of_the_tail() {
         "an ignored Roll names nothing"
     );
     assert_eq!(state.segment.id, SegmentId(2));
+}
+
+fn hold(segment: u64, end: u64, next_seq: u64) -> Hold {
+    Hold {
+        segment: SegmentId(segment),
+        end: Slot(end),
+        next_seq: Seq(next_seq),
+    }
+}
+
+/// A `Hold` extends the held prefix one segment at a time, only over a
+/// sealed segment, and only with an end and a position inside the fold.
+#[test]
+fn a_hold_extends_the_held_prefix_by_one_sealed_segment() {
+    let first = hold(0, 3, 1);
+    let second = hold(1, 11, 2);
+    let (state, outcomes) = fold(&[
+        set_leader(1, None),
+        write(1, 0, &[b"a"]),
+        roll(1),
+        Command::Hold(hold(1, 5, 2)),
+        Command::Hold(hold(0, 4, 1)),
+        Command::Hold(hold(0, 3, 2)),
+        Command::Hold(hold(0, 0, 0)),
+        Command::Hold(first),
+        Command::Hold(first),
+        write(1, 1, &[b"b"]),
+        roll(2),
+        Command::Hold(hold(1, 3, 2)),
+        Command::Hold(hold(1, 11, 0)),
+        Command::Hold(second),
+        Command::Hold(hold(2, 12, 2)),
+    ]);
+    assert_eq!(
+        outcomes[3],
+        Outcome::HoldIgnored(None),
+        "not the next segment"
+    );
+    assert_eq!(
+        outcomes[4],
+        Outcome::HoldIgnored(None),
+        "an end past the tail"
+    );
+    assert_eq!(
+        outcomes[5],
+        Outcome::HoldIgnored(None),
+        "a position past the fold"
+    );
+    assert_eq!(
+        outcomes[6],
+        Outcome::HoldIgnored(None),
+        "an end before the Roll"
+    );
+    assert_eq!(outcomes[7], Outcome::HeldTo(first));
+    assert_eq!(
+        outcomes[8],
+        Outcome::HoldIgnored(Some(first)),
+        "held already"
+    );
+    assert_eq!(
+        outcomes[11],
+        Outcome::HoldIgnored(Some(first)),
+        "an end at the held prefix's end"
+    );
+    assert_eq!(
+        outcomes[12],
+        Outcome::HoldIgnored(Some(first)),
+        "a position before the held prefix"
+    );
+    assert_eq!(outcomes[13], Outcome::HeldTo(second));
+    assert_eq!(
+        outcomes[14],
+        Outcome::HoldIgnored(Some(second)),
+        "the tail is not sealed"
+    );
+    assert_eq!(state.held, Some(second));
+    assert_eq!(state.next_seq, Seq(2), "a Hold moves no position");
+}
+
+/// A retry of a write inside the held prefix is `Held`, judged before the
+/// log is asked: the acceptors may have dropped the write. A retry past it
+/// is judged as before, and a write below `first_seq` is `Truncated`.
+#[test]
+fn a_retry_inside_the_held_prefix_is_held() {
+    let (state, outcomes) = fold(&[
+        set_leader(1, None),
+        write(1, 0, &[b"a"]),
+        write(1, 1, &[b"b"]),
+        roll(1),
+        Command::Hold(hold(0, 4, 2)),
+        write(1, 2, &[b"c"]),
+        write(1, 0, &[b"a"]),
+        write(1, 1, &[b"x"]),
+        write(1, 2, &[b"c"]),
+        truncate(1, 1),
+        write(1, 0, &[b"a"]),
+    ]);
+    let view = state.view();
+    assert_eq!(
+        outcomes[6],
+        Outcome::Held(super::JournalView {
+            first_seq: Seq(0),
+            ..view
+        })
+    );
+    assert_eq!(
+        outcomes[7],
+        Outcome::Held(super::JournalView {
+            first_seq: Seq(0),
+            ..view
+        }),
+        "inside the held prefix, the bytes are not read"
+    );
+    assert_eq!(
+        outcomes[8],
+        Outcome::Duplicate {
+            seq: Seq(2),
+            count: 1
+        }
+    );
+    assert!(matches!(outcomes[10], Outcome::Truncated(_)));
+    // The fold never asks the log for a position inside the held prefix.
+    let asked = std::cell::Cell::new(false);
+    let mut held = state.clone();
+    let _ = held.apply(WriterMode::Single, Slot(11), &write(1, 1, &[b"b"]), |_| {
+        asked.set(true);
+        None
+    });
+    assert!(!asked.get(), "a held write is not looked up");
+}
+
+/// A `Hold` of the tail is ignored even when its end lies inside the fold:
+/// only a sealed segment is held.
+#[test]
+fn a_hold_of_the_tail_is_ignored() {
+    let first = hold(0, 2, 1);
+    let (state, outcomes) = fold(&[
+        set_leader(1, None),
+        write(1, 0, &[b"a"]),
+        roll(1),
+        Command::Hold(first),
+        Command::Hold(hold(1, 3, 1)),
+    ]);
+    assert_eq!(
+        outcomes[3],
+        Outcome::HeldTo(first),
+        "an end inside the fold"
+    );
+    assert_eq!(outcomes[4], Outcome::HoldIgnored(Some(first)), "the tail");
+    assert_eq!(state.held, Some(first));
+}
+
+/// A held prefix that fits the state at each bound is well formed, and one
+/// past any bound is not.
+#[test]
+fn a_held_prefix_out_of_the_state_is_not_well_formed() {
+    let base = JournalState {
+        segment: Segment {
+            id: SegmentId(2),
+            start: Slot(5),
+        },
+        next_seq: Seq(1),
+        ..JournalState::default()
+    };
+    let with = |held: Hold| JournalState {
+        held: Some(held),
+        ..base.clone()
+    };
+    assert!(with(hold(1, 5, 1)).is_well_formed(), "every bound reached");
+    for held in [hold(2, 5, 1), hold(1, 6, 1), hold(1, 1, 1), hold(1, 5, 2)] {
+        assert!(!with(held).is_well_formed(), "{held:?}");
+    }
+}
+
+/// The postconditions of `apply` hold against a state they did not come
+/// from: a term that went back is a bug.
+#[test]
+#[should_panic(expected = "a journal's term never decreases")]
+fn a_term_that_goes_back_is_a_bug() {
+    let before = JournalState {
+        term: 1,
+        leader: Some(LeaderUuid(1)),
+        ..JournalState::default()
+    };
+    JournalState::default().assert_transition(&before, Slot(0), &Outcome::Noop);
+}
+
+/// A held prefix that moved with no valid `Hold` is a bug.
+#[test]
+#[should_panic(expected = "only a valid Hold moves the held prefix")]
+fn a_held_prefix_moved_by_no_hold_is_a_bug() {
+    let after = JournalState {
+        held: Some(hold(0, 1, 0)),
+        ..JournalState::default()
+    };
+    after.assert_held(&JournalState::default(), &Outcome::Noop);
+}
+
+/// A held prefix that does not fit the state is a bug.
+#[test]
+#[should_panic(expected = "a held segment is sealed")]
+fn a_held_tail_is_a_bug() {
+    let state = JournalState {
+        held: Some(hold(0, 1, 0)),
+        ..JournalState::default()
+    };
+    state.assert_invariants();
 }

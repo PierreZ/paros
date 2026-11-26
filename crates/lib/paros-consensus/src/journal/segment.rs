@@ -13,6 +13,7 @@
 //! A deployment with no matchmakers never chooses a `Roll` (R10, D5), so its
 //! log stays in the first segment for ever (R11).
 
+use crate::journal::Seq;
 use crate::types::{NodeId, Slot};
 
 /// The id of one segment of the log: `0` for the first, and one more at each
@@ -85,6 +86,36 @@ pub struct Roll {
     /// `Roll` ends, `Some` names new ones. The fold judges `next` alone; the
     /// replicas are carried for the routing of later steps.
     pub replicas: Option<ReplicaSet>,
+}
+
+/// **The held floor** (R7, D9 of §4.7): a command of the log that marks a
+/// sealed segment `Held`, once more than `F` of its replicas hold it whole and
+/// its end is in the chain. It is a [`Command::Hold`](crate::journal::Command::Hold),
+/// proposed only by a leader whose held tally marked the segment
+/// ([`crate::collector::HeldTally`]), never by a driver call.
+///
+/// Judged at apply in slot order: it is valid when it names the segment right
+/// after the held prefix (the first segment when none is held), that segment
+/// is sealed (it lies below the tail), and its `end` and `next_seq` lie past
+/// those of the held prefix and inside what the fold reached. A valid `Hold`
+/// extends the held prefix to `segment`
+/// ([`crate::journal::JournalState::held`]); any other changes nothing. Like
+/// a `Roll` it consumes a slot and no position.
+///
+/// A single-writer retry of a write below `next_seq` is then answered
+/// [`Outcome::Held`](crate::journal::Outcome::Held): the replicas of the
+/// segment hold the write, and the acceptors may drop it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Hold {
+    /// The segment that this `Hold` marks.
+    pub segment: SegmentId,
+    /// The first slot past the end of `segment` (the slot after its `Roll`),
+    /// as the fold of the leader gives it.
+    pub end: Slot,
+    /// The position that the next write took at the end of `segment`: every
+    /// write accepted inside the held prefix lies below it.
+    pub next_seq: Seq,
 }
 
 /// Where the tail segment of the log stands, as the fold of the chosen prefix
