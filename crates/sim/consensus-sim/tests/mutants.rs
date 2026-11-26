@@ -7,7 +7,7 @@ use consensus_sim::cluster::{Cluster, Flavor, Mutant};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
     CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND,
-    PREFIX_SHRINKS, ROUTE_TRUE,
+    PREFIX_SHRINKS, ROUTE_ON_PREFIX, ROUTE_TRUE,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -100,6 +100,16 @@ fn a_publish_on_a_proposal_is_caught_by_the_chain_oracle() {
 #[test]
 fn routing_by_the_tail_is_caught_by_the_route_oracle() {
     caught(Flavor::segments(), Mutant::RouteFromTail, 400, ROUTE_TRUE);
+}
+
+#[test]
+fn routing_at_the_decision_is_caught_by_the_prefix_route_oracle() {
+    caught(
+        Flavor::segments(),
+        Mutant::RouteOnDecision,
+        400,
+        ROUTE_ON_PREFIX,
+    );
 }
 
 #[test]

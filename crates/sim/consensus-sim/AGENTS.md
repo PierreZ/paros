@@ -100,7 +100,8 @@ Test only: `publish = false`, never a dependency of another crate.
     state, term included, that the journal rules fold after it; judged after each publish and each
     handover step at a matchmaker), `ROUTE_TRUE` (a `Commit` that a leader sends to the replicas of
     a segment names a slot whose every slot below is chosen, and the segment and replicas that the
-    journal rules fold the chosen log below it into: R4d and R6 of §4.7; judged on each batch).
+    journal rules fold the chosen log below it into: R4d and R6 of §4.7; judged on each batch;
+    `ROUTE_ON_PREFIX` is its R4d half).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
     (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6 (tag `journal-design-a`)) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
@@ -209,6 +210,8 @@ Test only: `publish = false`, never a dependency of another crate.
   publishes the end of the tail segment as the leader admits a `Roll`, caught by `CHAIN_TRUE`;
   `Mutant::RouteFromTail`: a leader's driver routes each `Commit` to the replicas of the tail
   segment of the leader's fold, caught by `ROUTE_TRUE`;
+  `Mutant::RouteOnDecision`: a leader's driver routes the `Commit` of a slot above its fold to the
+  replicas of its tail segment at the decision, caught by `ROUTE_ON_PREFIX`;
   `Mutant::CorruptTrimSegment`: a trim jump
   that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one

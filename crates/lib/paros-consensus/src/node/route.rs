@@ -28,8 +28,6 @@
 //! voters (step 8) that `Commit` goes away; **Open** (step 8): who routes such
 //! a slot.
 
-use std::collections::BTreeMap;
-
 use super::ColocatedNode;
 use crate::contract::{Audience, Message, Party};
 use crate::replica::ChosenLog;
@@ -44,9 +42,13 @@ impl ColocatedNode {
             return;
         }
         self.choosing.entry(slot).or_insert(ballot);
+        // Paired with the route, which reads the map from the old mark on.
         assert!(
-            self.choosing.contains_key(&slot),
-            "a noted slot holds a choosing ballot"
+            self.choosing
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.segment_routed),
+            "every choosing ballot lies at or above the route mark"
         );
     }
 
@@ -61,11 +63,15 @@ impl ColocatedNode {
             self.segment_routed <= folded,
             "the route mark never passes the fold"
         );
+        let mark = self.segment_routed;
         self.segment_routed = folded;
-        let below = std::mem::take(&mut self.choosing);
-        let (routable, above): (BTreeMap<_, _>, BTreeMap<_, _>) =
-            below.into_iter().partition(|(slot, _)| *slot < folded);
-        self.choosing = above;
+        let above = self.choosing.split_off(&folded);
+        let routable = std::mem::replace(&mut self.choosing, above);
+        // Paired with the note: no ballot was kept below the old mark.
+        assert!(
+            routable.keys().all(|slot| *slot >= mark),
+            "a routable ballot lies at or above the old route mark"
+        );
         assert!(
             self.choosing.keys().all(|slot| *slot >= folded),
             "the choosing ballots start at the route mark"
@@ -77,20 +83,22 @@ impl ColocatedNode {
         let mut slot = from;
         while slot < folded {
             let state = self.replica.journal_at(slot);
+            assert!(
+                state.segment.start <= slot,
+                "the segment of a slot starts at or below it"
+            );
             let replicas = state
                 .replicas
                 .clone()
                 .or_else(|| self.config.segment_replicas.clone());
             if let (Some(replicas), Some(&ballot)) = (replicas, routable.get(&slot)) {
-                let Some((record, command)) = ChosenLog::record(&self.acceptor, slot) else {
+                // The record's ballot is not compared with the choosing one:
+                // a slot learned first with no choosing ballot (a handoff's
+                // decided tail) keeps its record when a later `Commit` at a
+                // higher ballot notes that ballot.
+                let Some((_, command)) = ChosenLog::record(&self.acceptor, slot) else {
                     panic!("a folded slot holds its record in the chosen log");
                 };
-                // A record never stands below a ballot that chose its slot
-                // (`Acceptor::learn_chosen` raises it to the choosing one).
-                assert!(
-                    record >= ballot,
-                    "a folded record stands at or above its choosing ballot"
-                );
                 let command = command.clone();
                 self.pending_messages.push((
                     Audience::ReplicasOf {

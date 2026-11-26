@@ -59,13 +59,19 @@ segment it opens, and a `Roll` with none keeps the set before it (D4). The boots
 names the replicas of the first segment (`Config::segment_replicas`; `None` is the plain arm). A
 leader routes the `Commit` of each slot that its own fold applied to the replicas of the segment of
 that slot (`Audience::ReplicasOf`, `node/route.rs`), so the route is a fold of a chosen prefix; the
-`Commit` to the learners does not change (D2). A proxy leader keeps its `Commit` to the learners:
+`Commit` to the learners does not change (D2). A routed `Commit` carries a ballot that chose its
+slot: the ballot of the leader's own decision, or of a `Commit` it learned. It never carries the
+ballot of the leader's own record, which can stand at a later ballot that chose nothing (a
+recovery vote for the chosen command). A proxy leader keeps its `Commit` to the learners:
 the leader's walk routes every slot, delegated or not. The chain record holds the boundary state
 (`Opening::boundary`, the journal state after the `Roll`), which the oracle `CHAIN_TRUE` of
 consensus-sim judges against its own fold of the chosen log; the oracle `ROUTE_TRUE` judges each
-routed `Commit` (its control is the mutant `RouteFromTail`). Segments exist only with matchmakers,
-so a deployment without them routes nothing. **Open** (step 8): a slot that a follower folded and
-the leader of its time never routed is not routed by the next leader; today the `Commit` to the
+routed `Commit` (its controls are the mutants `RouteFromTail`, caught by `ROUTE_TRUE`, and
+`RouteOnDecision`, caught by `ROUTE_ON_PREFIX`). Segments exist only with matchmakers,
+so a deployment without them routes nothing. **Open** (step 8): two kinds of slot are not routed. A slot that a
+follower folded and the leader of its time never routed is not routed by the next leader. A slot
+that the leader learned with no choosing ballot (a catch-up replay, the decided tail of a handoff, a
+heal in Phase 1) is not routed either. Today the `Commit` to the
 learners reaches every replica, and with pure voters that `Commit` goes away. Not built yet: the catch-up between
 replicas, the chain in the matchmaking and probe answers, and the walk of consensus-sim with
 replicas of segments that join from the chain. Two limits of a bound replica wait

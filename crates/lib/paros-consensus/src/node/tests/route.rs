@@ -222,3 +222,68 @@ fn a_routed_commit_carries_the_ballot_that_chose_its_slot() {
         "the slot goes to its replicas at the ballot that chose it"
     );
 }
+
+/// A slot that the node learned chosen with no choosing ballot (as a
+/// handoff's decided tail teaches it) and then learns again from a `Commit`
+/// at a higher ballot is routed at that ballot, and the leader does not
+/// panic: its record stays at the lower ballot, which a correct run allows.
+#[test]
+fn a_slot_learned_twice_is_routed_at_the_ballot_of_its_commit() {
+    let set = ReplicaSet::new([NodeId(9)]);
+    let (mut nodes, mut mms) = cluster_with_first(Some(&set), 3);
+    let q = matchmade(&mut nodes, 0, &mut mms);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    let first = nodes[0].ballot();
+    let s0 = nodes[0].replica().folded();
+    let s1 = Slot(s0.0 + 1);
+    nodes[0].propose(entry(1, 1, 10));
+    nodes[0].propose(entry(1, 2, 10));
+    let _ = drain(&mut nodes[0]);
+    let command = |n: &ColocatedNode, slot| {
+        n.proposer
+            .rounds()
+            .get(&slot)
+            .expect("the leader opened a round at the slot")
+            .command()
+            .clone()
+    };
+    let (c0, c1) = (command(&nodes[0], s0), command(&nodes[0], s1));
+    // As a handoff's decided tail: chosen above a hole, no ballot noted.
+    nodes[0].mark_chosen(s1, &c1, first);
+    let _ = drain(&mut nodes[0]);
+    let higher = Ballot {
+        round: first.round + 1,
+        node: NodeId(1),
+    };
+    let mut routed = Vec::new();
+    for (slot, command) in [(s1, c1), (s0, c0)] {
+        nodes[0].step(Message::Commit {
+            from: Party::Node(NodeId(1)),
+            ballot: higher,
+            slot,
+            command,
+        });
+        let (_, mut more) = drain_with(&mut nodes[0], |ready| {
+            ready
+                .messages()
+                .iter()
+                .filter_map(|(audience, message)| match (audience, message) {
+                    (Audience::ReplicasOf { .. }, Message::Commit { slot, ballot, .. }) => {
+                        Some((*slot, *ballot))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        routed.append(&mut more);
+    }
+    assert!(nodes[0].is_leader(), "a Commit alone deposes no leader");
+    assert_eq!(
+        nodes[0].acceptor().record(s1).map(|(ballot, _)| *ballot),
+        Some(first),
+        "the record of the slot learned first stays at its ballot"
+    );
+    routed.sort();
+    assert_eq!(routed, [(s0, higher), (s1, higher)]);
+}

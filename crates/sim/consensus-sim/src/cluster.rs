@@ -2585,6 +2585,8 @@ struct Known {
     tail: paros_consensus::journal::state::JournalState,
     /// The replicas of the first segment that the node's configuration names.
     first: Option<ReplicaSet>,
+    /// The first slot the node's fold has not applied.
+    folded: Slot,
 }
 
 impl Known {
@@ -2593,19 +2595,51 @@ impl Known {
             belief: node.acceptors_since(),
             tail: node.replica().journal(),
             first: node.config().segment_replicas.clone(),
+            folded: node.replica().folded(),
         }
     }
 }
 
 /// The bugs a node's driver plants on a batch from what the node knows:
 /// [`Mutant::BeliefFence`] from its belief, and [`Mutant::RouteFromTail`]
-/// from its tail segment and the replicas of its first segment.
-fn plant_driver(mutant: Option<Mutant>, known: &Known, batch: &mut [(Audience, Message)]) {
+/// and [`Mutant::RouteOnDecision`] from its tail segment and the replicas
+/// of its first segment.
+fn plant_driver(mutant: Option<Mutant>, known: &Known, batch: &mut Vec<(Audience, Message)>) {
     match mutant {
         Some(Mutant::BeliefFence) => belief_fences(known.belief, batch),
         Some(Mutant::RouteFromTail) => route_from_tail(&known.tail, known.first.as_ref(), batch),
+        Some(Mutant::RouteOnDecision) => {
+            route_on_decision(known, batch);
+        }
         _ => {}
     }
+}
+
+/// The [`Mutant::RouteOnDecision`] bug: a `Commit` a leader sends to the
+/// learners for a slot its fold has not reached also goes to the replicas
+/// of its tail segment, at the decision, over the hole below it.
+fn route_on_decision(known: &Known, batch: &mut Vec<(Audience, Message)>) {
+    let tail = &known.tail;
+    let Some(replicas) = tail.replicas.clone().or_else(|| known.first.clone()) else {
+        return;
+    };
+    let decided: Vec<(Audience, Message)> = batch
+        .iter()
+        .filter(|(audience, message)| {
+            !matches!(audience, Audience::ReplicasOf { .. })
+                && matches!(message, Message::Commit { slot, .. } if *slot > known.folded)
+        })
+        .map(|(_, message)| {
+            (
+                Audience::ReplicasOf {
+                    segment: tail.segment.id,
+                    replicas: replicas.clone(),
+                },
+                message.clone(),
+            )
+        })
+        .collect();
+    batch.extend(decided);
 }
 
 /// The [`Mutant::RouteFromTail`] bug: every `Commit` to the replicas of a
