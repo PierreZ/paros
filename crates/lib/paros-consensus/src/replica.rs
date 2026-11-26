@@ -172,8 +172,10 @@ pub struct Replica {
     /// The slot [`Replica::base`] was folded up to: the retention floor.
     floor: Slot,
     /// The journal state after every slot below `floor` — sealed durably
-    /// with each truncation, carried by a trim-point jump.
-    base: JournalState,
+    /// with each truncation, carried by a trim-point jump. Boxed: it moves
+    /// only with the floor, and it keeps a `ColocatedNode` small enough for
+    /// a driver to hold several on its stack.
+    base: Box<JournalState>,
     /// The first slot the fold has not applied: at or below the first
     /// unchosen slot, and below it only at a hole (a slot of the prefix whose
     /// value this node does not hold).
@@ -257,7 +259,7 @@ impl Replica {
             chosen_index,
             advance_pending: false,
             floor,
-            base: sealed.clone(),
+            base: Box::new(sealed.clone()),
             folded: floor,
             state: sealed,
             history: BTreeMap::new(),
@@ -585,7 +587,7 @@ impl Replica {
             self.base.first_seq <= self.state.first_seq,
             "the base lies behind the head"
         );
-        self.base.clone()
+        (*self.base).clone()
     }
 
     /// The first slot the fold has not applied.
@@ -802,7 +804,7 @@ impl Replica {
         self.history
             .range(..slot)
             .next_back()
-            .map_or_else(|| self.base.clone(), |(_, state)| state.clone())
+            .map_or_else(|| (*self.base).clone(), |(_, state)| state.clone())
     }
 
     /// The highest slot a decided truncation lets this replica drop. `None`
@@ -1587,7 +1589,7 @@ impl Replica {
             base.segment.start <= first,
             "the sealed tail segment opens at or below the sealed floor"
         );
-        self.base = base;
+        *self.base = base;
         self.floor = first;
         self.chosen = self.chosen.split_off(&first);
         self.history = self.history.split_off(&first);

@@ -5,11 +5,15 @@
 //! `note_folded_rolls`) and the publisher (which says when the end is in the
 //! chain). The count itself is [`HeldTally`](crate::collector::HeldTally).
 //!
+//! A leader proposes a [`Hold`] for each segment its tally marks, in order,
+//! so that the held segments of the log are a prefix (D9: the held floor is a
+//! decided command, judged at apply by [`crate::journal::JournalState`]).
+//!
 //! Segments exist only with matchmakers (R10, D5): a deployment without them
 //! ignores every report, and its tally stays empty.
 
-use super::ColocatedNode;
-use crate::journal::SegmentId;
+use super::{ColocatedNode, Delegation, NodeRole, ProposeResult};
+use crate::journal::{Command, Hold, SegmentId};
 use crate::publisher::Publisher;
 use crate::types::{NodeId, Slot};
 
@@ -35,10 +39,13 @@ impl ColocatedNode {
         if counted {
             self.judge_held(segment);
         }
+        self.propose_holds();
     }
 
     /// Mark `segment` `Held` when its reports and the chain allow it: the
-    /// end is in the chain once this node's publish of it completed.
+    /// end is in the chain once this node's publish of it completed. `F` is
+    /// the `f` of the configuration that this node believes in force when it
+    /// judges (D8).
     pub(super) fn judge_held(&mut self, segment: SegmentId) {
         let published = self
             .publisher
@@ -51,6 +58,69 @@ impl ColocatedNode {
         if held.judge(segment, config, published) {
             assert!(published, "a held segment's end is in the chain");
             assert!(held.is_held(segment), "a judged segment is marked held");
+        }
+    }
+
+    /// The held prefix as this node knows the log: the fold's, then each
+    /// later `Hold` it knows ([`ColocatedNode::known_past_fold`]), in slot
+    /// order, when it names the segment right after the prefix (the rule of
+    /// the fold). `None` while no segment is held.
+    pub(super) fn known_held(&self) -> Option<SegmentId> {
+        let folded = self.replica.journal().held.map(|hold| hold.segment);
+        let mut prefix = folded;
+        for command in self.known_past_fold().into_values() {
+            if let Command::Hold(hold) = command
+                && hold.segment == prefix.map_or(SegmentId::FIRST, SegmentId::successor)
+            {
+                prefix = Some(hold.segment);
+            }
+        }
+        assert!(
+            prefix >= folded,
+            "the known held prefix is at or past the folded one"
+        );
+        prefix
+    }
+
+    /// Propose a `Hold` for each segment past the known held prefix that the
+    /// tally marked `Held`, in order, until one is not: the fold accepts a
+    /// `Hold` only for the segment right after the prefix. A node that is
+    /// not the leader proposes nothing, and a new leader proposes the
+    /// segments its own tally marks again from the reports.
+    pub(super) fn propose_holds(&mut self) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        let Some(tally) = self.held.as_ref() else {
+            return;
+        };
+        let mut next = self
+            .known_held()
+            .map_or(SegmentId::FIRST, SegmentId::successor);
+        let mut holds = Vec::new();
+        while tally.is_held(next) {
+            let sealed = tally.sealed(next).expect("a held segment is noted");
+            holds.push(Hold {
+                segment: next,
+                end: sealed.end,
+                next_seq: sealed.next_seq,
+            });
+            next = next.successor();
+        }
+        for hold in holds {
+            assert!(
+                hold.end.0 > hold.segment.0,
+                "a held segment ends past the Roll of each segment before it"
+            );
+            if let ProposeResult::NotLeader(_) =
+                self.propose_command_at(Command::Hold(hold), Delegation::Auto)
+            {
+                return;
+            }
+            assert!(
+                self.known_held() == Some(hold.segment),
+                "an admitted Hold extends the known held prefix"
+            );
         }
     }
 

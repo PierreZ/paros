@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::journal::{ReplicaSet, SegmentId};
+use crate::journal::{ReplicaSet, SegmentId, Seq};
 use crate::membership::AcceptorConfig;
 use crate::types::{NodeId, Slot};
 
@@ -33,6 +33,9 @@ pub struct SealedSegment {
     pub start: Slot,
     /// The first slot past its end (the slot after its `Roll`).
     pub end: Slot,
+    /// The position that the next write took at its end: the fold's
+    /// `next_seq` at its `Roll`, which a `Hold` carries.
+    pub next_seq: Seq,
     /// The replicas that keep it: the set the fold gives at its `Roll`,
     /// else the deployment's `Config::segment_replicas`. `None` when
     /// neither names one: such a segment is never held.
@@ -94,15 +97,23 @@ impl HeldTally {
     }
 
     /// Fold the report of `from` that it holds `segment` up to `end`.
-    /// Returns whether the report counts: the segment is noted, `from` is
-    /// one of its replicas, and the ends agree. A report that does not
-    /// count changes nothing (wire input, never asserted).
+    /// Returns whether the report counts: the segment is noted and not held
+    /// yet, `from` is one of its replicas, and the ends agree. A report that
+    /// does not count changes nothing (wire input, never asserted): a held
+    /// segment needs no report, and a replica reports on every beat.
     ///
     /// # Panics
     ///
     /// If a counted report names a sender outside the replicas: a
     /// programmer error.
     pub fn report(&mut self, from: NodeId, segment: SegmentId, end: Slot) -> bool {
+        if self.held.contains(&segment) {
+            assert!(
+                !self.reports.contains_key(&segment),
+                "a held segment keeps no report"
+            );
+            return false;
+        }
         let Some(fold) = self.sealed.get(&segment) else {
             return false;
         };

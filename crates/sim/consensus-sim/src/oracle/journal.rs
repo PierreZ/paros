@@ -34,12 +34,21 @@
 //!   writer modes. So every party that folds a slot to these outcomes ends
 //!   each segment at the same slot: one end for each segment (`SegsAgree` of
 //!   `specs/tla/multi-paxos-roll/`).
+//! - `Hold(segment, end, next_seq)` (§4.7, R7 and D9) is valid when it names
+//!   the segment right after the held prefix (the first segment when none is
+//!   held), that segment is sealed, and `end` and `next_seq` are exactly the
+//!   end of that segment and the next position at its `Roll`, as this spec
+//!   folded them. The held prefix then reaches `segment`, and the outcome
+//!   names the `Hold`. Any other `Hold` moves nothing and names the held
+//!   prefix it was judged against. From then on, a write below the held
+//!   prefix's `next_seq` and at or above `first_seq` is `Held`: the replicas
+//!   of its segment answer for it.
 
 use std::collections::BTreeMap;
 
 use paros_consensus::Slot;
 use paros_consensus::journal::{
-    Command, Control, Entry, JournalView, LeaderUuid, Outcome, Segment, SegmentId, Seq,
+    Command, Control, Entry, Hold, JournalView, LeaderUuid, Outcome, Segment, SegmentId, Seq,
 };
 
 /// The oracle: every party folds a slot to the outcome the journal rules
@@ -55,6 +64,11 @@ pub struct JournalSpec {
     /// The tail segment's id and its first slot.
     segment: u64,
     segment_start: u64,
+    /// Each sealed segment, by id: the slot after its `Roll` and the next
+    /// position there.
+    ends: Vec<(u64, u64)>,
+    /// The last valid `Hold`: the held prefix.
+    held: Option<Hold>,
     /// Every accepted write, by the position of its first record.
     accepted: BTreeMap<u64, Entry>,
     /// Per folded slot: the view before it and the outcome it gets.
@@ -121,6 +135,7 @@ impl JournalSpec {
         match command {
             Command::Control(Control::Noop) => Outcome::Noop,
             Command::Roll(roll) => self.roll(slot, roll.next),
+            Command::Hold(hold) => self.hold(*hold),
             Command::Write(entry) => self.write(entry),
             Command::Control(Control::SetLeader { new, old }) => self.set_leader(*new, *old),
             Command::Control(Control::Truncate { leader, up_to }) => self.truncate(*leader, *up_to),
@@ -135,6 +150,9 @@ impl JournalSpec {
         }
         if seq < self.first {
             return Outcome::Truncated(self.view());
+        }
+        if self.held.is_some_and(|held| seq < held.next_seq.0) {
+            return Outcome::Held(self.view());
         }
         if seq < self.next {
             return if self.accepted.get(&seq) == Some(entry) {
@@ -176,9 +194,23 @@ impl JournalSpec {
         if next.0 != self.segment + 1 {
             return Outcome::RollIgnored(self.tail());
         }
+        self.ends.push((slot.0 + 1, self.next));
         self.segment = next.0;
         self.segment_start = slot.0 + 1;
         Outcome::Rolled(self.tail())
+    }
+
+    fn hold(&mut self, hold: Hold) -> Outcome {
+        let expected = self.held.map_or(0, |held| held.segment.0 + 1);
+        let sealed = usize::try_from(hold.segment.0)
+            .ok()
+            .and_then(|k| self.ends.get(k))
+            .copied();
+        if hold.segment.0 != expected || sealed != Some((hold.end.0, hold.next_seq.0)) {
+            return Outcome::HoldIgnored(self.held);
+        }
+        self.held = Some(hold);
+        Outcome::HeldTo(hold)
     }
 
     fn truncate(&mut self, leader: LeaderUuid, up_to: Seq) -> Outcome {
@@ -227,6 +259,45 @@ mod tests {
             next: SegmentId(next),
             replicas: None,
         })
+    }
+
+    fn hold(segment: u64, end: u64, next_seq: u64) -> Command {
+        Command::Hold(Hold {
+            segment: SegmentId(segment),
+            end: Slot(end),
+            next_seq: Seq(next_seq),
+        })
+    }
+
+    #[test]
+    fn a_hold_extends_the_held_prefix_and_a_retry_below_it_is_held() {
+        let a = write(1, 0, b"a");
+        let outcomes = fold(&[
+            claim(1, None),
+            a.clone(),
+            roll(1),
+            hold(0, 2, 1),
+            hold(0, 3, 1),
+            hold(1, 3, 1),
+            hold(0, 3, 1),
+            a,
+            write(1, 1, b"b"),
+        ]);
+        let held = Hold {
+            segment: SegmentId(0),
+            end: Slot(3),
+            next_seq: Seq(1),
+        };
+        assert_eq!(outcomes[3], Outcome::HoldIgnored(None), "the wrong end");
+        assert_eq!(outcomes[4], Outcome::HeldTo(held));
+        assert_eq!(outcomes[5], Outcome::HoldIgnored(Some(held)), "not sealed");
+        assert_eq!(
+            outcomes[6],
+            Outcome::HoldIgnored(Some(held)),
+            "held already"
+        );
+        assert_eq!(outcomes[7], Outcome::Held(view(Some(1), 1, 0)));
+        assert!(matches!(outcomes[8], Outcome::Accepted { .. }));
     }
 
     #[test]
