@@ -237,7 +237,9 @@ impl Flavor {
     /// proxies, replicas, handoff, reads and truncation. The last spare
     /// joins the pool late, and each node and each proxy leader admits it
     /// on its own ([`Action::Admit`]): a proxy whose pool lags ignores a
-    /// delegation whose configuration names it.
+    /// delegation whose configuration names it. The proxies' pools lag
+    /// through the quiet phase, where leaders stand and reconfigure onto
+    /// the late spare, and catch up at the settle rounds.
     #[must_use]
     pub fn reconfigured_compartments() -> Self {
         Self {

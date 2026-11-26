@@ -599,8 +599,13 @@ impl Model for Cluster {
         // lagging-reader walk keeps the pools lagging through the quiet
         // phase, where leaders stand and reconfigure, and admits them when
         // the settle rounds start (`Cluster::tick_all`).
+        // The pools of the proxy leaders lag through the quiet phase too,
+        // and catch up when the settle rounds start: with the faults
+        // stopped, a leader that stands reconfigures onto a late node, and
+        // its delegations meet a proxy that ignores them until a take-back
+        // or a move runs the round (`ProxyLeader::admits`).
         if self.flavor.steer != Steer::LaggingReader {
-            self.admit_all();
+            self.admit_nodes_and_replicas();
         }
         // Some proxies stay dead for the tail: a leader's take-back is the
         // only way their rounds decide.
@@ -1689,7 +1694,7 @@ impl Cluster {
     }
 
     fn tick_all(&mut self, cx: &mut Cx<'_, Self>) {
-        if self.flavor.steer == Steer::LaggingReader && cx.phase() == Phase::Settle {
+        if cx.phase() == Phase::Settle {
             self.admit_all();
         }
         self.step_down_after_compaction(cx);

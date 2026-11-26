@@ -197,6 +197,22 @@ impl Cluster {
         if late.is_empty() {
             return;
         }
+        self.admit_nodes_and_replicas();
+        for site in &mut self.proxies {
+            self.proxy_admitted
+                .entry(site.id)
+                .or_default()
+                .extend(late.iter().copied());
+            if let Some(proxy) = site.live.as_mut() {
+                let _ = proxy.extend_pool(&late);
+            }
+        }
+    }
+
+    /// Every node and every replica admits every late node; the proxy
+    /// leaders do not.
+    pub(super) fn admit_nodes_and_replicas(&mut self) {
+        let late = self.late_ids();
         for site in &mut self.nodes {
             let known = self.admitted.entry(site.id).or_default();
             known.extend(late.iter().filter(|l| **l != site.id));
@@ -211,15 +227,6 @@ impl Cluster {
                 .extend(late.iter().copied());
             if let Some(replica) = site.live.as_mut() {
                 let _ = replica.extend_pool(&late);
-            }
-        }
-        for site in &mut self.proxies {
-            self.proxy_admitted
-                .entry(site.id)
-                .or_default()
-                .extend(late.iter().copied());
-            if let Some(proxy) = site.live.as_mut() {
-                let _ = proxy.extend_pool(&late);
             }
         }
     }
