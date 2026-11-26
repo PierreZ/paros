@@ -539,7 +539,7 @@ NoRetiredLivelock == \A b \in Ballots : []<>(~ RetiredBlocked(b))
 \* contrast check two_controllers_operator): the operator's half keeps
 \* exactly this out, so the control needs the second controller. A
 \* reconfiguration at or below a floor is not counted: the operator's half
-\* says nothing of it, and a matchmaker refuses to register it anyway.
+\* (the guard of Retire, b > w) covers only ballots above the floor.
 NoRetiredNamed ==
     \A b \in Ballots :
         (status[b] = "matching" /\ kind[b] = Reconf /\ \A m \in Matchmakers : b > wm[m])
