@@ -9,8 +9,10 @@
 //! `F` of its replicas reported it ([`AcceptorConfig::is_held_by`], D8) and
 //! its end is in the chain (the control `held_log` of
 //! `specs/tla/held-floor/`: a floor past an end that the chain does not
-//! publish). `Held` only grows: a replica that reported a segment held it
-//! durably, and at most `F` replica disks are lost (`MarkHeld` of
+//! publish). `Held` only grows, and a report counts forever: a replica that
+//! reported a segment held it durably, and at most `F` replicas are down at
+//! one time, a replica being down from a lost disk until it copies the
+//! segment again (`held_ever` of `specs/tla/held-floor-retry/`, `MarkHeld` of
 //! `specs/tla/held-floor/HeldFloor.tla`).
 //!
 //! What it does not know: who leads, or whether the chain holds the end. The
