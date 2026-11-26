@@ -731,6 +731,22 @@ fn rule_11_holds_when_a_role_cannot_address_the_spare() {
 }
 
 #[test]
+fn rule_11_reads_no_pool_of_a_fresh_node_outside_the_configuration() {
+    // Node 9 is fresh and outside `C`, and its pool lacks spare 4. It sends
+    // no `Prepare` and no `Accept` to the spare, so its pool does not count.
+    let (config, mut view) = silent_three(&[4]);
+    view.observe_node(follower(4, &config));
+    view.observe_node(NodeFeedback {
+        pool: ids(&[1, 2, 3]),
+        ..follower(9, &config)
+    });
+    assert_eq!(
+        evaluate(&view, &[spare(4)], &POLICY),
+        reconfigure_to(majority(&[1, 2, 4]))
+    );
+}
+
+#[test]
 fn rule_11_takes_the_first_spare_that_every_role_can_address() {
     let (_, view) = silent_three(&[8, 5, 4]);
     assert_eq!(
