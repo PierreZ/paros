@@ -78,11 +78,17 @@
 (*   Losses  "total": at most `F` lost disks over the run. "at_once": any  *)
 (*           number, with at most `F` replicas down at one time.           *)
 (*           "at_once_f1": a control, `F + 1` down at one time.            *)
+(*   CompactTo "kept": the `Compact` of a `Truncate` lands on a closed     *)
+(*           floor, the fixed point of `Replica::compaction_floor`: a      *)
+(*           retry above the floor that folds as a duplicate keeps the     *)
+(*           record that it reads. "any": a control, the `Compact` of      *)
+(*           `Truncation.tla`, which stops at any point below its target.  *)
 (***************************************************************************)
 EXTENDS Truncation
 
 CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes,
-          HoldOf, HoldBy, HoldWhen, Judges, HoldDrop, RetryOf, JumpTo, Count, Losses
+          HoldOf, HoldBy, HoldWhen, Judges, HoldDrop, RetryOf, JumpTo, Count, Losses,
+          CompactTo
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
@@ -95,6 +101,7 @@ ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 ASSUME HoldDrop \in {"keep", "end"} /\ RetryOf \in [Retries -> Commands]
 ASSUME JumpTo \in {"past", "any"}
 ASSUME Count \in {"now", "ever"} /\ Losses \in {"total", "at_once", "at_once_f1"}
+ASSUME CompactTo \in {"kept", "any"}
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -361,8 +368,18 @@ FloorsHeld ==
         \/ floor'[a] \in UNION {past[p] : p \in Acceptors}
         \/ \E t \in Slots : Compact(a, t)
 
+\* A `Compact` of `Truncation.tla` lands on a closed floor (with
+\* `CompactTo = "kept"`): the driver's `up_to` may stop it below its
+\* target, and `Replica::compaction_floor` lowers the floor to the fixed
+\* point of the retries above it (`kept_from`). With no retry, every floor
+\* is closed.
+CompactsKept ==
+  CompactTo = "kept" /\ Retries # {} =>
+    \A a \in Acceptors :
+      (floor'[a] # floor[a] /\ \E t \in Slots : Compact(a, t)) => Closed(floor'[a])
+
 HeldNext ==
-  \/ Next /\ UNCHANGED seg /\ (HoldWhen = "held" => HoldProposedHeld') /\ FloorsHeld
+  \/ Next /\ UNCHANGED seg /\ (HoldWhen = "held" => HoldProposedHeld') /\ FloorsHeld /\ CompactsKept
   \/ \E n \in Judges, t \in Slots, p \in 0..NS : Judge(n, t, p)
   \/ \E r \in Replicas : Copy(r) \/ LoseReplica(r)
   \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in HeldFloorNodes : HeldFloor(a, k)
@@ -511,4 +528,9 @@ NoLossAfterHeld == ~(held # {} /\ rlost > 0)
 \* of its replicas hold all of it. With `Count = "ever"`, a report of a
 \* replica that lost its disk since counts, and the mark comes with fewer.
 NoStaleMark == [][\A k \in Segs : (k \notin held /\ k \in held') => Cardinality(HoldsAll(k)') >= Need]_<<hvars, past, reported>>
+\* A node learned a `Truncate` whose target is not closed: a retry above
+\* the target reads a write below it, so the compaction stops below.
+NoCompactKept == ~\E a \in Acceptors, t \in Slots :
+                    learned[a][t] \in Truncations /\ PrefixChosen(t + 1)
+                    /\ ~Closed(CompactTarget(t))
 =============================================================================

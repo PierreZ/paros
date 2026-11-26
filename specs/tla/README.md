@@ -2865,6 +2865,9 @@ replica holds only chosen slots of its own segments).
 | `hold_end` (in `held-floor-retry/`) | ci | violation of `RetryKept`: the drop at the `Hold` goes to the end of segment 1, over the retry at slot 2, which reads the record of slot 0 |
 | `reach_retry_keep` (in `held-floor-retry/`) | ci | violation of `NoRetryKeep`: a node folded the `Hold` with a retry in the window, and its floor stays below the end |
 | `reach_hold_laggard` | long | violation of `NoLaggardWin`: `reach_laggard_win` with the decided `Hold` (5.9 million states, 14 minutes with 4 workers) |
+| `compact_kept` (in `held-floor-hold/`) | ci | pass: `c1`, `c2`, a retry of `c1`, then a `Truncate` that releases `c1` (`CompactPlan`, no `Roll`); the target of the compaction is slot 1, below the write that the retry reads, and every `Compact` lands on a closed floor (`CompactTo = "kept"`, `Replica::compaction_floor`), so `RetryKept` holds (4,670 distinct states) |
+| `compact_any` (in `held-floor-hold/`) | ci | violation of `RetryKept`: `compact_kept` with the `Compact` of `truncation/`, which stops at any point below its target (`CompactTo = "any"`) |
+| `reach_compact_kept` (in `held-floor-hold/`) | ci | violation of `NoCompactKept`: the constants of `compact_kept`; a node learned a `Truncate` whose target is not closed |
 | `hold_tally` (in `held-floor-hold/`) | ci | violation of `OneAnswer`: the floor from the tally of each node; `a1` answers "held" where `a2` answers "dup" |
 | `hold_any` (in `held-floor-hold/`) | ci | violation of `RecordKept`: a `Hold` of a segment that is not held drops a record that no replica holds |
 | `reach_hold_judge`, `reach_hold_drop` (in `held-floor-hold/`) | ci | violation: a node answers "held"; a node folds a `Hold` and drops the held segment |
@@ -2876,8 +2879,8 @@ replica holds only chosen slots of its own segments).
 
 `held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
 `held_loss`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of
-the decided `Hold` and of the retries (`held-floor-retry/` also the tally that never forgets a
-report), so that each of the four jobs stays inside its minutes.
+the decided `Hold` and of the retries (`held-floor-hold/` also the `Compact` of a `Truncate` over
+a retry, `held-floor-retry/` the tally that never forgets a report), so that each of the four jobs stays inside its minutes.
 The guard mutation of `HeldFloor.tla` runs the checks of the four folders.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
