@@ -222,7 +222,6 @@ impl ColocatedNode {
             .replica
             .advance(&self.acceptor, &mut self.pending_writes);
         self.note_rolls();
-        self.judge_released();
         self.route_to_segment_replicas();
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
@@ -238,5 +237,8 @@ impl ColocatedNode {
             self.acceptor.first_slot() <= self.first_unchosen(),
             "a walk's compaction never outruns the chosen prefix"
         );
+        // Last, once the walk and its compaction are judged: a `Hold` that
+        // this proposes can decide at once and walk again.
+        self.judge_released();
     }
 }

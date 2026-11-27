@@ -104,7 +104,10 @@ pub enum LogRead {
     /// replica whose floor rose before its fold reached the truncation that
     /// let it rise answers this — one that jumped to a peer's trim point
     /// ([`Replica::trim_to`]) or rebooted onto a fold stopped at a hole —
-    /// typically only until its fold catches up. The reader asks elsewhere: the
+    /// typically only until its fold catches up, and a replica that drops
+    /// held records ([`HeldRecords::Drop`]) for every position below the
+    /// held prefix's, for good: the replicas of the held segment keep
+    /// those records. The reader asks elsewhere: the
     /// driver answers it unserved, never `Truncated` (the journal still has
     /// the record) and never a page (this replica cannot produce it).
     NotHeld,
@@ -1010,15 +1013,13 @@ impl Replica {
     /// A `from` at or past `first_seq` but below the base's `next_seq` is
     /// [`LogRead::NotHeld`]: every record the base counts sits in a slot
     /// below the floor, dropped here. A floor this replica's own truncation
-    /// set keeps the slot holding `first_seq`, so this meets only a floor
-    /// that rose ahead of the fold: a trim-point jump adopts the peer's base
-    /// at its floor while the decided `Truncate` that let the peer's floor
-    /// rise sits in a slot above it this fold has not reached yet (or a
-    /// reboot's refold stopped at a hole below that slot). Serving such a
-    /// read used to panic looking for the record in the positions index;
-    /// red→green: main-hunt seed 2382785388621081873 (a node jumped to trim
-    /// point 5 with base `first_seq` 0, `next_seq` 1, missed the truncation
-    /// at slot 19, and a quorum read from 0 confirmed at its fold head).
+    /// set keeps the slot holding `first_seq`, so this meets a floor that
+    /// rose ahead of the fold (a trim-point jump adopts the peer's base at
+    /// its floor while the decided `Truncate` that let the peer's floor rise
+    /// sits in a slot above it this fold has not reached yet, or a reboot's
+    /// refold stopped at a hole below that slot), and the floor of a replica
+    /// that drops held records, at the end of the held prefix: the replicas
+    /// of the held segment serve those positions.
     ///
     /// # Panics
     ///
@@ -1117,7 +1118,6 @@ impl Replica {
             "a bound replica keeps the segment it is bound to"
         );
         self.held_records = policy;
-        assert!(self.held_records == policy, "the policy is in force");
     }
 
     /// The first slot that the held prefix lets this replica drop below:
@@ -1201,8 +1201,13 @@ impl Replica {
     /// # Panics
     ///
     /// If the fold passed more than one `Roll` since its base: a bound fold
-    /// never walks past the end of its segment.
+    /// never walks past the end of its segment. If the replica drops held
+    /// records: a bound replica keeps its segment.
     pub fn bind_segment(&mut self) {
+        assert!(
+            self.held_records == HeldRecords::Keep,
+            "a replica that drops held records is never bound"
+        );
         let kept = self.base.segment.id;
         assert!(
             self.state.segment.id == kept || self.state.segment.id == kept.successor(),
@@ -1532,9 +1537,6 @@ impl Replica {
         pinned |= self
             .sealed_end()
             .is_some_and(|end| self.floor.0 + 1 == end.0);
-        // The end of the held prefix pins its slot on a replica that drops
-        // held records.
-        pinned |= self.held_end() == Some(self.floor);
         if self.mode == WriterMode::Single {
             for slot in self.chosen.range(self.floor..self.folded) {
                 let Some(entry) = chosen_command(log, *slot).1.write() else {

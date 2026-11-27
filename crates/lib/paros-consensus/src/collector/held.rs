@@ -159,14 +159,24 @@ impl HeldTally {
         let Some(fold) = self.sealed.get(&segment) else {
             return false;
         };
+        // Released: every write of the segment lies below `first_seq`. The
+        // model also releases a segment with no write as soon as it ends
+        // (`SegReleased` of `specs/tla/held-floor-released/`); this rule
+        // releases it once `first_seq` reaches its position, never earlier,
+        // so it holds no more than the model does. It loses no progress: a
+        // `Roll` never sets the replicas back to none, so the segments with
+        // no replicas are a prefix, and an empty one among them has the
+        // position of the segment before it, which needs the same release.
         let released = fold.next_seq <= first_seq;
         let copies = fold.replicas.as_ref().map_or(0, |replicas| {
             self.reports.get(&segment).map_or(0, |reporters| {
                 reporters.iter().filter(|r| replicas.contains(**r)).count()
             })
         });
+        // Paired with `report`, which counts no report of a segment with no
+        // replicas.
         assert!(
-            fold.replicas.is_some() || copies == 0,
+            fold.replicas.is_some() || !self.reports.contains_key(&segment),
             "a segment with no replicas has no report"
         );
         if !released && (fold.replicas.is_none() || !config.is_held_by(copies)) {

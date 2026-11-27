@@ -65,7 +65,9 @@ impl ColocatedNode {
     /// Judge each noted segment that the fold's `first_seq` released, after
     /// a walk: a `Truncate` can release a segment whose end the chain
     /// already holds, and no report or publish comes after it. Then propose
-    /// the `Hold`s it allows.
+    /// the `Hold`s that the tally allows, released or not: a leader whose
+    /// tally marked a segment before it won proposes its `Hold` here, with
+    /// no report or publish to wait for.
     pub(super) fn judge_released(&mut self) {
         let first_seq = self.replica.journal().first_seq;
         let Some(held) = self.held.as_ref() else {
@@ -76,9 +78,6 @@ impl ColocatedNode {
             "only a matchmaker deployment keeps a held tally"
         );
         let released: Vec<SegmentId> = held.released(first_seq).collect();
-        if released.is_empty() {
-            return;
-        }
         for segment in released {
             self.judge_held(segment);
             // The released rule: a released segment needs no report, only

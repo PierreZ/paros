@@ -229,8 +229,11 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   point of the retries, as for a `Truncate`. A retry that folded `Held` reads no record, so it
   holds no floor down. **Decided** (Pierre, 2026-11-26): a released
   segment counts as held. A segment whose writes all lie below `first_seq` is marked
-  `Held` with no replica, since a `Truncate` already released its records; a segment with no
-  write is released as soon as it ends. The held segments are a prefix, so without this rule a
+  `Held` with no replica, since a `Truncate` already released its records; in the model, a
+  segment with no write is released as soon as it ends. The code releases a segment with no
+  write once `first_seq` reaches its position, never earlier (`HeldTally::judge`): a `Roll`
+  never sets the replicas back to none, so the segments with no replicas are a prefix, and an
+  empty one has the position of the segment before it, which needs the same release. The held segments are a prefix, so without this rule a
   segment with no replicas (the first segment of a journal with no `Config::segment_replicas`)
   stops every `Hold` after it. The check is `Skip = "released"` of
   `specs/tla/held-floor-released/`: a released segment with no replicas, then a held segment
