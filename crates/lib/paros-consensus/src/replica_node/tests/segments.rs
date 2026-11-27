@@ -814,6 +814,7 @@ fn a_lagging_replica_pulls_from_no_pooled_node_of_its_set() {
             NodeId(10),
             NodeId(11),
             NodeId(12),
+            NodeId(13),
         ])),
         ..Config {
             id: NodeId(10),
@@ -821,7 +822,7 @@ fn a_lagging_replica_pulls_from_no_pooled_node_of_its_set() {
         }
     });
     let mut laggard = ReplicaNode::new(&disk, Limits::DEFAULT);
-    for (turn, peer) in [11, 12, 11].into_iter().enumerate() {
+    for (turn, peer) in [11, 12, 13, 11].into_iter().enumerate() {
         laggard.step(Message::TrimmedTo {
             from: NodeId(0),
             point: Slot(3),
@@ -887,4 +888,49 @@ fn a_peer_serves_a_contiguous_page_from_the_asked_slot() {
     let _ = sent(&mut peer, &mut disk);
     assert_eq!(page_from(&mut peer, &mut disk, 3), Vec::<Slot>::new());
     assert_eq!(peer.counters().peer_pages, 3);
+}
+
+/// A page holds at most `CATCHUP_BATCH` records: the receiver drops a
+/// longer one, so a longer page would heal nothing.
+#[test]
+fn a_peer_page_holds_at_most_one_batch() {
+    use crate::contract::limits::CATCHUP_BATCH;
+    let mut disk = MemStorage::new(peer_config(11));
+    let mut peer = ReplicaNode::new(&disk, Limits::DEFAULT);
+    let held = CATCHUP_BATCH as u64 + 2;
+    for slot in 0..held {
+        peer.step(commit(slot, write(7)));
+    }
+    let _ = drain(&mut peer, &mut disk);
+    let page = page_from(&mut peer, &mut disk, 0);
+    assert_eq!(page.len(), CATCHUP_BATCH);
+    assert_eq!(page.first(), Some(&Slot(0)));
+    assert_eq!(page.last(), Some(&Slot(CATCHUP_BATCH as u64 - 1)));
+    assert_eq!(
+        page_from(&mut peer, &mut disk, held - 1),
+        vec![Slot(held - 1)]
+    );
+}
+
+/// A pull of the first segment, queued before the replica joins the next
+/// one, addresses a peer of the segment it leaves: the join drops it, and
+/// the batch after the join sends no message to a replica set.
+#[test]
+fn a_join_drops_the_pull_of_the_segment_it_leaves() {
+    let mut disk = MemStorage::new(peer_config(10));
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(3),
+        state: boundary(),
+        first_seq: Seq(0),
+    });
+    assert_eq!(replica.counters().peer_pulls, 1);
+    assert_eq!(replica.join_segment(Slot(2), boundary()), Ok(()));
+    let out = sent(&mut replica, &mut disk);
+    assert!(
+        out.iter()
+            .all(|(to, _)| !matches!(to, Audience::ReplicasOf { .. })),
+        "a join keeps no pull of the segment it leaves: {out:?}"
+    );
 }

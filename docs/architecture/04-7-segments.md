@@ -293,7 +293,12 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   **Open** (step 6):
   a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
   holds every slot that a decided `Truncate` did not release, but the rule that counts it needs
-  a model with replicas that compact (`held-floor/` has none).
+  a model with replicas that compact (`held-floor/` has none). The peer pull of R8 rests on
+  this rule as it is: a peer serves records contiguous from the asked slot, so a lagging
+  replica heals only while some holder keeps the segment from its start. The rule that counts
+  a compacted replica must also let a holder answer a pull below its floor (with a trim point
+  inside the segment that a replica takes from a peer), and `peer-pull/` must get a holder
+  with a floor.
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
