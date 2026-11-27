@@ -2948,36 +2948,43 @@ What is not in the model: a third configuration, the restart and the faulty reco
 
 ### `held-reseat/`: the held tally across a change of the replica set of a segment, for step 6 of the segments in the core
 
-The first Open of R8 of `docs/architecture/04-7-segments.md`. A segment is `Held` once `F + 1`
-of its replicas reported it whole, and then the acceptors drop it (R7). The set of a segment
-changes by a `SetReplicas` of the open segment at slot `SetAt` (D10: each `Commit` above it goes
-to the new set), or by a heal of the sealed segment, a `Decree` at the matchmakers that replaces
-`HealOut` by `HealIn` and that the fold does not see. `HeldReseat.tla` is standalone: the log is
+The safety Open of R8 of `docs/architecture/04-7-segments.md`; the rule here is proposed, not
+decided. A segment is `Held` once `F + 1` of its replicas reported it whole, and then the
+acceptors drop it (R7). The set of a segment changes by a `SetReplicas` of the open segment at
+slot `SetAt` (D10: each `Commit` above it goes to the new set), or by a heal of the sealed
+segment, a `Decree` at the matchmakers that replaces `HealOut` by `HealIn` and that the fold does
+not see. A set may go back to an earlier value (R8). `HeldReseat.tla` is standalone: the log is
 slots `1..N`, chosen in order, the `Roll` at `N` (`held-floor/` checks the log and the floor).
-Each change of the set is a new version, and the held mark names the version that it judged. A
-removed replica keeps its copy until the segment is held at the version in force (`Released`),
-and the fault rule counts it with the set in force until then: at most `F` protected replicas
-are lost and not yet whole at one time. A released replica may lose its copy at any time. Any
-replica that a set named may report, a removed one too, so the tally sorts the reports.
-`Kept`: once the acceptors dropped the segment, each slot is held by some replica. `Sound`, in
-every check: a replica holds only chosen slots, only a replica that a set named holds any, the
-acceptors hold nothing once they dropped the segment, and a heal comes only on a sealed segment.
-Every guard mutant is caught (`scripts/mutate-tla.py held-reseat`: 13 caught).
+Each change of the set is a new version. The tally stamps a report with the version that it
+knows and counts it only at that version (`Stamp`), and the held mark names the version that it
+judged. A removed replica keeps its copy until the segment is held at the version in force
+(`Released`), and the fault rule counts it with the set in force until then: at most `F`
+protected replicas are lost and not yet whole at one time. A released replica may lose its copy
+at any time. Any replica that a set named may report, a removed one too, so the tally sorts the
+reports. `Kept`: once the acceptors dropped the segment, each slot is held by some replica.
+`Sound`, in every check: a replica holds only chosen slots, only a replica that a set named holds
+any, the acceptors hold nothing once they dropped the segment, and a heal comes only on a sealed
+segment. Every guard mutant is caught (`scripts/mutate-tla.py held-reseat`: 13 caught). Every
+check has `F = 1`, three losses and `N = 2`.
 
 | Check | CI | Result |
 |---|---|---|
-| `open` | ci | pass of `Kept`: `SetReplicas` at slot 1 replaces `c` by `d`, the rule (`Count = "inforce"`, `Report = "whole"`), `F = 1`, two losses |
+| `open` | ci | pass of `Kept`: `SetReplicas` at slot 1 replaces `c` by `d`, the rule (`Count = "inforce"`, `Report = "whole"`, `Stamp = "version"`) |
 | `reach_open` | ci | violation of `NoRelease`: the constants of `open`; the removed `c` is released |
 | `open_ever` | ci | violation of `Kept`: the control `Count = "ever"` counts the report of the removed `c` |
 | `open_routed` | ci | violation of `Kept`: the control `Report = "routed"`; the new `d` reports without slot 1 |
-| `heal` | ci | pass of `Kept`: a heal of the sealed segment replaces `a` by `d`; the tally judges the segment again over `b`, `c`, `d` |
+| `heal` | ci | pass of `Kept`: a heal of the sealed segment replaces `a` by `d`; the tally judges the segment again over `b`, `c`, `d` (0.18 million distinct states) |
 | `heal_fold` | ci | violation of `Kept`: the control `Count = "fold"` knows only the set of the fold; its mark stands after the heal and releases `a` |
-| `heal_ever` | ci | violation of `Kept`: the control `Count = "ever"` judges again at once over `a` and `b` |
+| `heal_ever` | ci | violation of `Kept`: the control `Count = "ever"` counts the new report of the removed `a` |
 | `reach_heal` | ci | violation of `NoHeldAfterHeal`: the constants of `heal`; the tally marks the segment held again after the heal |
+| `back` | ci | pass of `Kept`: the set goes back; `SetReplicas` replaces `c` by `d`, then a heal replaces `a` by `c` (0.31 million distinct states) |
+| `back_nostamp` | ci | violation of `Kept`: the control `Stamp = "none"`; `c` reports at version 0, is released and drops its copy, the heal adds it back, its old report counts, and `a` is released |
 
 What is not in the model: the routing of a `SetReplicas` and what a new replica serves before it
-is whole (`segment-reseat/`, D10), who proposes the heal, and how the tally learns a heal from the
-chain (the Open on liveness of R8).
+is whole (`segment-reseat/`, D10), a second heal, who proposes the heal, and how the tally learns
+a heal from the chain (the liveness Open of R8). The tally of the code (`collector/held.rs`)
+deletes the reports of a segment at `Held` and refuses later reports of it, so it must change
+before a set can change.
 
 ### `peer-pull/`: the pull of a lagging replica from a peer of its segment, for step 6 of the segments in the core
 

@@ -308,18 +308,25 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   set (peer catch-up), and there is no choice to make. The journal controller (§4.8) changes the
   set: a replacement is an order, as autoscaling is. No code comes before the models of the four
   points below:
-  - **Modelled, not built** (safety): the held tally across a change of the set, by a
-    `SetReplicas` of the open segment (D10) or a heal of a sealed one. `specs/tla/held-reseat/`
-    checks the rule: the tally counts a report only from a member of the set in force; a
-    replica reports only once it holds the segment whole, so a new member counts as down until
-    then; each change of the set is a new version, the held mark names the version that it
-    judged, and a heal makes the tally judge the segment again. A removed replica keeps its
-    copy until the segment is held at the version in force (it is released then), and only a
-    released replica may drop its copy outside the F failures. The controls: a tally that
-    counts any report (`open_ever`, `heal_ever`), a report of only the routed slots
-    (`open_routed`), and a tally that knows only the set of the fold, so it neither sees a heal
-    nor judges again (`heal_fold`); each loses a slot. The routing of `SetReplicas` and the join
-    of a new replica stay for `specs/tla/segment-reseat/` (D10).
+  - **Open** (safety; a rule is proposed and modelled, not decided and not built): the held
+    tally across a change of the set, by a `SetReplicas` of the open segment (D10) or a heal of
+    a sealed one. `specs/tla/held-reseat/` checks the proposed rule: each change of the set is a
+    new version; the tally stamps a report with the version that it knows and counts it only
+    at that version, and only from a member of the set in force; a replica reports only once it
+    holds the segment whole, so a new member counts as down until then; the held mark names the
+    version that it judged, and a heal makes the tally judge the segment again. A removed
+    replica keeps its copy until the segment is held at the version in force (it is released
+    then). The fault rule of the model is a reading too: at most F replicas of the set in force
+    and the removed ones not yet released are lost and not yet whole at one time, and a released
+    replica may drop its copy at any time. The controls: a tally that counts any report
+    (`open_ever`, `heal_ever`), a report of only the routed slots (`open_routed`), a tally that
+    knows only the set of the fold (`heal_fold`), and reports with no version
+    (`back_nostamp`: the set goes back to an earlier value, and a replica that left, dropped its
+    copy and came back counts with its old report); each loses a slot. The tally of the code
+    (`collector/held.rs`) must change two ways for it: its reports are kept by segment and
+    version, and a held segment takes reports again after a change of its set (today `judge`
+    deletes the reports at `Held` and `report` refuses a held segment). The routing of
+    `SetReplicas` and the join of a new replica stay for `specs/tla/segment-reseat/` (D10).
   - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
     the leader's fold does not see. The tally and the route must learn the new set from the
     chain.

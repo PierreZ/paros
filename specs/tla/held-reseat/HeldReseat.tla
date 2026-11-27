@@ -34,6 +34,11 @@
 (*          segment (the rule: a new member counts as down until then).   *)
 (*          "routed": a control, a replica reports once it holds the      *)
 (*          slots that the leader routed to it.                            *)
+(*   Stamp  "version": the tally stamps a report with the version of the   *)
+(*          set that it knows, and counts a report only at its version     *)
+(*          (the rule). "none": a control, a report counts at every        *)
+(*          version, so a replica that left the set, dropped its copy and  *)
+(*          came back counts with its old report.                          *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -49,10 +54,12 @@ CONSTANTS
   F,        \* the tolerated failures: `Held` at F + 1 reports
   Losses,   \* how many copies may be lost in a behaviour
   Count,
-  Report
+  Report,
+  Stamp
 
 ASSUME Count \in {"inforce", "ever", "fold"}
 ASSUME Report \in {"whole", "routed"}
+ASSUME Stamp \in {"version", "none"}
 ASSUME Old \subseteq Reps /\ New \subseteq Reps /\ {HealOut, HealIn} \subseteq Reps
 ASSUME N \in Nat \ {0} /\ SetAt \in 0..(N - 1)
 ASSUME F \in Nat
@@ -63,7 +70,7 @@ VARIABLES
   chosen,   \* the slots chosen so far: 1..chosen
   acc,      \* the slots that the acceptors hold, until they drop them
   holds,    \* holds[r]: the slots that replica r holds
-  reports,  \* the replicas whose report the leader holds (never forgotten)
+  reports,  \* the reports that the leader holds, <<replica, version>>
   heldAt,   \* the version of the set that the tally judged held, or -1
   healed,   \* the heal of the sealed segment is decided
   lost,     \* the replicas that lost their copy at least once
@@ -107,7 +114,7 @@ TypeOK ==
   /\ chosen \in 0..N
   /\ acc \subseteq Slots
   /\ holds \in [Reps -> SUBSET Slots]
-  /\ reports \subseteq Reps
+  /\ reports \subseteq Reps \X (0..2)
   /\ heldAt \in -1..2
   /\ healed \in BOOLEAN
   /\ lost \subseteq Reps
@@ -159,14 +166,18 @@ Copy(s, r, p) ==
 ReportHeld(r) ==
   /\ IF Report = "whole" THEN Whole(r)
      ELSE Sealed /\ r \in WasIn /\ {s \in Slots : r \in Route(s)} \subseteq holds[r]
-  /\ reports' = reports \cup {r}
+  /\ reports' = reports \cup {<<r, TallyVersion>>}
   /\ UNCHANGED <<chosen, acc, holds, heldAt, healed, lost, losses>>
 
 \* The leader judges the tally: F + 1 reports of the set it counts, at the
 \* version it knows. A report comes only from a sealed segment. Then the
 \* acceptors drop the segment.
+Counted == {q \in TallySet :
+              IF Stamp = "version" THEN <<q, TallyVersion>> \in reports
+              ELSE \E v \in 0..2 : <<q, v>> \in reports}
+
 Judge ==
-  /\ Cardinality(reports \cap TallySet) >= F + 1
+  /\ Cardinality(Counted) >= F + 1
   /\ heldAt' = TallyVersion
   /\ acc' = {}
   /\ UNCHANGED <<chosen, holds, reports, healed, lost, losses>>
