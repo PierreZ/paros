@@ -2902,7 +2902,11 @@ links them too and runs the released segment (`Skip`), so that each of the five 
 its minutes. The guard mutation of `HeldFloor.tla` runs the checks of the five folders.
 `held-floor-trimmed/` links `HeldFloor.tla` and `Truncation.tla`, and adds `HeldTrim.tla` (the
 step `TrimReplica` and the constant `TrimBy`: `"released"`, the proof of `JournalState::releases`;
-`"segment"`, a control) with its own `MC.tla`.
+`"segment"`, a control) with its own `MC.tla`. `TrimProof` admits any chosen `Hold` below the
+floor that reaches the segment, and the head `first_seq` of `FirstUnchosen(p)`;
+`JournalState::releases` reads only the last valid `Hold` of the state at the point, a `Hold` at
+or above any earlier one, so every proof that Rust admits is one the model checks. No trace spec
+follows the trim step: the walks check it with the oracle `TRIM_TRUE` of consensus-sim.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
 replicas that a `Roll` names (the sets are fixed, D4), the heal and the trim of a sealed segment

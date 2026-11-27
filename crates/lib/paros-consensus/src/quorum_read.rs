@@ -143,6 +143,10 @@ pub enum ReadOpen {
     /// A read is already open at this token: nothing changed. The driver
     /// waits for that read's answer or uses another token.
     TokenInUse,
+    /// The replica keeps a segment that a `Truncate` released
+    /// ([`crate::replica_node::ReplicaNode::is_trimmed`]): it never covers a
+    /// read again, so nothing opened. The driver asks another replica.
+    Trimmed,
 }
 
 /// Where one quorum read stands.

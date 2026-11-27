@@ -509,7 +509,17 @@ impl Model for Cluster {
                 let Some(replica) = self.replica_mut(id).live.as_mut() else {
                     return;
                 };
+                let trimmed = replica.is_trimmed();
                 replica.step(msg);
+                // Only a trim point turns a replica trimmed.
+                if replica.is_trimmed() && !trimmed {
+                    let segment = replica
+                        .replica()
+                        .segment_bound()
+                        .expect("a trimmed replica keeps a segment");
+                    self.ledger
+                        .trim_holds(&format!("replica {}", id.0), segment);
+                }
                 self.drain_replica(id, cx);
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
@@ -710,7 +720,10 @@ impl Model for Cluster {
         }
         // A replica keeps one segment (R6): a sealed one learned all it
         // keeps once it reached the end of its segment, and one that found
-        // its segment released while it lagged keeps nothing more.
+        // its segment released while it lagged keeps nothing more. A replica
+        // seals only when its walk applies the `Roll` of its segment (R6), so
+        // a sealed one stands at its end and passes by construction; the
+        // check fails only when a walk stops short of its end.
         for site in self
             .replicas
             .iter()
@@ -2510,6 +2523,21 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
             state.next_seq = Seq(state.next_seq.0 + 1);
         }
+        // A trim point inside the replica's segment, shaped as a release:
+        // its state one segment on, as `CorruptTrimSegment` shapes it, and a
+        // head `first_seq` at the next position of that state.
+        (
+            Some(Mutant::ForgeTrimRelease),
+            Message::TrimmedTo {
+                point,
+                state,
+                first_seq,
+                ..
+            },
+        ) if to_replica && state.segment.start < *point => {
+            state.segment = state.segment.rolled_at(state.segment.start);
+            *first_seq = (*first_seq).max(state.next_seq);
+        }
         // A tail one segment ahead, shaped as a real one: segment `k + 1`
         // opened at the slot after the start of `k`, still below the point.
         (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { point, state, .. })
@@ -2729,19 +2757,45 @@ fn to_matchmakers<'a>(
     matches.chain(gc)
 }
 
-/// The envelopes of one batch: each audience resolved to parties. A
-/// `Learners` audience reaches the replicas too, as a deployment map
-/// routes it.
 /// The FNV-1a digest of the `Debug` text of `batch`: every field of every
 /// value the core put in it, in order.
 fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     // A journal state with no replica set and no held prefix digests as it
     // did before the fields existed, so the digests of the flavors with no
     // replicas of a segment and no `Hold` stay those of the code before them.
+    // A trim point digests without the sender's head `first_seq`, the last
+    // field of a `TrimmedTo`, for the same reason: the walks that send one
+    // digest as they did before the field existed.
     let text = format!("{batch:?}")
         .replace(", held: None }", " }")
         .replace(", replicas: None }", " }");
+    let text = without_trim_first_seq(&text);
     fnv1a(paros_consensus::types::FNV_OFFSET, text.as_bytes())
+}
+
+/// `text` without the `, first_seq: Seq(N)` that ends each `TrimmedTo`.
+/// That field follows the journal state, so it is the one `first_seq` that
+/// a `}` comes before; the `first_seq` of a journal state follows a `Seq`.
+fn without_trim_first_seq(text: &str) -> String {
+    const FIELD: &str = "}, first_seq: Seq(";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(FIELD) {
+        let tail = &rest[at + FIELD.len()..];
+        let close = tail.find(')').expect("a Seq closes");
+        assert!(
+            tail[..close].bytes().all(|b| b.is_ascii_digit()),
+            "a Seq is a number"
+        );
+        assert!(
+            tail[close + 1..].starts_with(" }"),
+            "first_seq ends a TrimmedTo"
+        );
+        out.push_str(&rest[..=at]);
+        rest = &tail[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The match requests of a batch, without their addressees.

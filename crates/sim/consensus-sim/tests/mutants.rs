@@ -8,7 +8,7 @@ use consensus_sim::oracle::healed::{HEALED, NO_FALSE_SILENCE};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
     CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND,
-    PREFIX_SHRINKS, ROUTE_ON_PREFIX, ROUTE_TRUE,
+    PREFIX_SHRINKS, ROUTE_ON_PREFIX, ROUTE_TRUE, TRIM_TRUE,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -90,6 +90,16 @@ fn a_corrupt_segment_in_a_trim_jump_is_caught_by_the_journal_rules() {
         Mutant::CorruptTrimSegment,
         400,
         JOURNAL_FOLD,
+    );
+}
+
+#[test]
+fn a_forged_release_in_a_trim_point_is_caught_by_the_trim_oracle() {
+    caught(
+        Flavor::segment_replicas(),
+        Mutant::ForgeTrimRelease,
+        400,
+        TRIM_TRUE,
     );
 }
 

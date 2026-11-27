@@ -525,8 +525,9 @@ impl ReplicaNode {
     /// row, since a replica votes nothing. `row` is the driver's choice, as
     /// on a node; a row the configuration lacks falls back to the default.
     ///
-    /// Returns what the ask did ([`ReadOpen`]): a token already open, or no
-    /// read basis yet, opens nothing and is a result, never a panic.
+    /// Returns what the ask did ([`ReadOpen`]): a token already open, a
+    /// trimmed replica, or no read basis yet, opens nothing and is a result,
+    /// never a panic.
     ///
     /// # Panics
     ///
@@ -536,6 +537,16 @@ impl ReplicaNode {
         if self.quorum_reads.is_open(ctx) {
             self.assert_invariants();
             return ReadOpen::TokenInUse;
+        }
+        // A trimmed replica applies nothing again: a read it opened would
+        // wait for a prefix it never reaches.
+        if self.trimmed {
+            assert!(
+                self.replica.segment_bound().is_some(),
+                "only a replica of a segment is trimmed"
+            );
+            self.assert_invariants();
+            return ReadOpen::Trimmed;
         }
         // On a matchmaker deployment a read waits for a won leadership's
         // beat (#260): the bootstrap configuration is no basis, the
@@ -906,6 +917,7 @@ impl ReplicaNode {
             if let Some(bound) = self.replica.segment_bound()
                 && !self.replica.is_sealed()
                 && !self.trimmed
+                && state.is_well_formed()
                 && state.releases(bound, first_seq)
             {
                 probe!(

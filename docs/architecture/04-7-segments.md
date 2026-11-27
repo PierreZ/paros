@@ -86,7 +86,10 @@ later segment and proves every write of the replica's segment below that `first_
 (`JournalState::releases`: it reaches the state's `next_seq`, or the `next_seq` of a `Hold` of
 that segment or a later one), the replica marks its segment trimmed
 (`ReplicaNode::is_trimmed`): it pulls nothing, serves no read (`LogRead::NotHeld`) and ignores
-later trim points. The mark is not durable: after a boot, the next trim jump proves it again.
+later trim points, and it opens no quorum read (`ReadOpen::Trimmed`). The mark is not durable:
+after a boot, the replica pulls and serves its store again until the next trim point proves the
+release again. In that window it serves what its store holds, under the fold it reached, as any
+replica that lags behind a `Truncate` does.
 Its model is `specs/tla/held-floor-trimmed/` (`TrimProof`, with the control `trim_segment`: a
 trim point of any later segment as the proof marks a segment that its peers hold). **Open**
 (step 6): a lagging replica of a segment that its peers hold (`Held` by reports, not released)

@@ -80,7 +80,7 @@ jobs:
       # #248 (TigerStyle assertions): the assertions per function of paros-consensus only go up.
       # The floor is the density of main, to four places; a pull request that raises the density raises it.
       - name: Check the paros-consensus assertion density
-        run: scripts/count-assertions.py --min 1.7155
+        run: scripts/count-assertions.py --min 1.7164
       # scripts/mutants.sh: cargo-mutants 27.1 deletes the fields of some struct updates in every
       # run, whatever `--re` says, so each such mutant costs every second pass of the nightly about
       # 20 minutes of trace checks. A list that matches nothing must be empty. `--list` builds

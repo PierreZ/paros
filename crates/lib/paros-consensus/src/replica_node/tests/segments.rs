@@ -661,5 +661,10 @@ fn a_lagging_replica_of_a_released_segment_stops() {
             "a trimmed replica ignores every trim point"
         );
         assert!(!replica.replica().is_sealed());
+        assert_eq!(
+            replica.quorum_read_in(9, None) == ReadOpen::Trimmed,
+            releases,
+            "a trimmed replica opens no read"
+        );
     }
 }

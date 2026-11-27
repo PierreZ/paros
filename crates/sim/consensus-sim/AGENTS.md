@@ -101,7 +101,9 @@ Test only: `publish = false`, never a dependency of another crate.
     handover step at a matchmaker), `ROUTE_TRUE` (a `Commit` that a leader sends to the replicas of
     a segment names a slot whose every slot below is chosen, and the segment and replicas that the
     journal rules fold the chosen log below it into: R4d and R6 of §4.7; judged on each batch;
-    `ROUTE_ON_PREFIX` is its R4d half).
+    `ROUTE_ON_PREFIX` is its R4d half), `TRIM_TRUE` (a replica of a segment stops as trimmed only
+    once the chosen prefix seals its segment and its `first_seq` reaches the next position at the
+    seal: R6 and R7 of §4.7; judged when a replica turns trimmed).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
     (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6 (tag `journal-design-a`)) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
@@ -239,7 +241,9 @@ Test only: `publish = false`, never a dependency of another crate.
   `Mutant::RouteOnDecision`: a leader's driver routes the `Commit` of a slot above its fold to the
   replicas of its tail segment at the decision, never past a `Roll` it holds above its fold (one bug), caught by `ROUTE_ON_PREFIX`;
   `Mutant::CorruptTrimSegment`: a trim jump
-  that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
+  that carries the next segment, caught by the journal rules, whose spec folds the `Roll`;
+  `Mutant::ForgeTrimRelease`: a trim point to a replica shaped as a release (its state one segment
+  on, its head `first_seq` at that state's next position), caught by `TRIM_TRUE`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one
   copy of the retained log)): every flavor walks 12 fixed seeds, and the cluster folds every
   batch that a node, a proxy leader or a replica hands its driver into one FNV-1a digest

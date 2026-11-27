@@ -595,6 +595,12 @@ pub enum Mutant {
     /// folds the next `Roll` another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimSegment,
+    /// The network makes a trim point that it delivers to a replica look
+    /// like a release: its state one segment on, and its head `first_seq`
+    /// at the next position of that state. A lagging replica then stops as
+    /// trimmed while the chosen log still keeps writes of its segment.
+    /// Caught by [`TRIM_TRUE`](crate::oracle::ledger::TRIM_TRUE).
+    ForgeTrimRelease,
     /// The driver drops every order of the journal controllers: the member
     /// that stopped for good stays in the configuration. Caught by
     /// [`HEALED`](crate::oracle::healed::HEALED) at the end of the settle

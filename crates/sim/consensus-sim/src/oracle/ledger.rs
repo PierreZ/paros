@@ -54,6 +54,10 @@
 //!    whose every slot below is chosen ([`ROUTE_ON_PREFIX`]), and the
 //!    segment and the replicas
 //!    that the journal rules fold the chosen log below it into.
+//! 12. **A trim is true** ([`TRIM_TRUE`]): a replica of a segment stops as
+//!     trimmed only once the chosen prefix seals the segment and its
+//!     `first_seq` reaches the next position at the seal. (Oracles 10 and
+//!     11 are those of goal 2, in `healed.rs`.)
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,6 +90,11 @@ pub const ROUTE_TRUE: &str =
 /// Oracle 9, its first half: R4d alone.
 pub const ROUTE_ON_PREFIX: &str =
     "a Commit goes to the replicas of a segment only once every slot below it is chosen";
+/// Oracle 12: a replica stops as trimmed only once the chosen log seals its
+/// segment and releases every write of it (R6 and R7 of
+/// `docs/architecture/04-7-segments.md`, `TrimmedReleased` of
+/// `specs/tla/held-floor-trimmed/`).
+pub const TRIM_TRUE: &str = "a replica stops as trimmed only on a segment the chosen log released";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -362,6 +371,41 @@ impl Ledger {
             expected.0 == segment && expected.1.as_ref() == Some(replicas),
             "{ROUTE_TRUE}: {who} routed slot {} to {replicas:?} of segment {}, and the chosen log gives {expected:?}",
             slot.0,
+            segment.0,
+        );
+    }
+
+    /// Oracle 12: `who`, a replica of `segment`, stopped as trimmed. The
+    /// spec folds the whole chosen prefix, then the segment must be sealed
+    /// and its next position at the seal at or below `first_seq`: no write
+    /// of it is left that a reader may ask for.
+    ///
+    /// # Panics
+    ///
+    /// If the chosen prefix does not seal `segment`, or keeps a write of it
+    /// at or above its `first_seq`.
+    pub fn trim_holds(&mut self, who: &str, segment: SegmentId) {
+        // The chosen map is keyed by slot: its first hole ends the prefix.
+        let prefix = self
+            .chosen
+            .keys()
+            .zip(0..)
+            .take_while(|(slot, at)| slot.0 == *at)
+            .count() as u64;
+        if let Some(last) = prefix.checked_sub(1) {
+            let (chosen, commands) = (&self.chosen, &self.commands);
+            let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+            let _ = self.journal.judge(Slot(last), lookup);
+        }
+        assert!(
+            self.journal.folded() >= prefix,
+            "the spec folds the chosen prefix"
+        );
+        let sealed = self.journal.sealed(segment);
+        let first = self.journal.first();
+        assert!(
+            sealed.is_some_and(|(_, next)| next <= first),
+            "{TRIM_TRUE}: {who} stopped on segment {}, and the chosen prefix of {prefix} slots seals it at {sealed:?} with first_seq {first}",
             segment.0,
         );
     }
