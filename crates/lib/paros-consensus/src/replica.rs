@@ -859,6 +859,11 @@ impl Replica {
         // The replicas of a held segment hold it whole (R7): a replica that
         // drops held records may go to the end of the held prefix.
         if let Some(end) = self.held_end() {
+            probe!(
+                sometimes,
+                end > first,
+                "compaction: a held segment drops records no Truncate released"
+            );
             first = first.max(end);
         }
         // A sealed replica keeps the `Roll` that ends its segment (R6): its

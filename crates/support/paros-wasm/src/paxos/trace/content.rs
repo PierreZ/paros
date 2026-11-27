@@ -1023,6 +1023,7 @@ mod tests {
                 from: NodeId(1),
                 point: Slot(5),
                 state: paros_consensus::journal::JournalState::default(),
+                first_seq: paros_consensus::journal::Seq(0),
             },
             true,
         );

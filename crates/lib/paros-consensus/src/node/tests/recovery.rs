@@ -435,6 +435,7 @@ fn a_trim_point_jump_drops_a_faulty_record_below_it() {
         from: NodeId(0),
         point: Slot(2),
         state: crate::journal::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert!(
         n.acceptor().faulty().is_empty(),
@@ -730,6 +731,7 @@ fn a_trim_point_jump_resolves_a_blocked_repair_below_it() {
         from: NodeId(1),
         point: Slot(1),
         state: crate::journal::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(n.blocked_repairs(), 0, "the jump resolved slot 0");
     assert!(n.proposer().probe().is_none(), "the probe closed");

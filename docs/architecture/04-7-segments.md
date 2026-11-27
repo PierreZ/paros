@@ -74,12 +74,26 @@ that the leader learned with no choosing ballot (a catch-up replay, the decided 
 heal in Phase 1) is not routed either. Today the `Commit` to the
 learners reaches every replica, and with pure voters that `Commit` goes away. Not built yet: the catch-up between
 replicas, the chain in the matchmaking and probe answers, and the walk of consensus-sim with
-replicas of segments that join from the chain. Two limits of a bound replica wait
-for step 6. **Open** (step 6): the acceptors may compact past the `Roll` of a segment before its
+replicas of segments that join from the chain. The acceptors may compact past the `Roll` of a segment before its
 replicas hold it, since the compaction of a `Truncate` does not wait for `Held` (R7: a segment
-that a `Truncate` released counts as held); a replica of that segment that
-lags below the `Roll` then gets only trim points of a later segment, refuses each one, and never
-seals. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
+that a `Truncate` released counts as held); a replica of that segment that lags below the `Roll`
+then gets only trim points of a later segment and refuses each one. **A lagging replica of a
+released segment stops as trimmed** (Pierre, 2026-11-27, on the card "Choose how a lagging
+replica of a released segment finishes"; found by the `segment-replicas` walk of consensus-sim):
+a `TrimmedTo` also carries the sender's `first_seq` at the head of its fold, since the state
+sealed at the point can predate the `Truncate` that raised the point. When that state is in a
+later segment and proves every write of the replica's segment below that `first_seq`
+(`JournalState::releases`: it reaches the state's `next_seq`, or the `next_seq` of a `Hold` of
+that segment or a later one), the replica marks its segment trimmed
+(`ReplicaNode::is_trimmed`): it pulls nothing, serves no read (`LogRead::NotHeld`) and ignores
+later trim points, and it opens no quorum read (`ReadOpen::Trimmed`). The mark is not durable:
+after a boot, the replica pulls and serves its store again until the next trim point proves the
+release again. In that window it serves what its store holds, under the fold it reached, as any
+replica that lags behind a `Truncate` does.
+Its model is `specs/tla/held-floor-trimmed/` (`TrimProof`, with the control `trim_segment`: a
+trim point of any later segment as the proof marks a segment that its peers hold). **Open**
+(step 6): a lagging replica of a segment that its peers hold (`Held` by reports, not released)
+still refuses every trim point; the catch-up between replicas heals it. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
 hole below the `Roll`) stays in its durable store; the seal drops it from memory and the boot
 skips it, and no `WriteOp` deletes a record above the floor. The states past `Sealed` decide
 what a sealed replica's store keeps.

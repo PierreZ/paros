@@ -1,0 +1,14 @@
+# A lagging replica of a released segment (R6, R7 of
+# docs/architecture/04-7-segments.md): a trim jump past its segment proves
+# every write of it below `first_seq`, and the replica marks it `Trimmed`.
+# HeldTrim.tla, over HeldFloor.tla of held-floor/ (a link), with `TrimBy`.
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+trimmed            pass       ci
+reach_trimmed      violation  ci
+trimmed_late       pass       ci
+reach_trimmed_late violation  ci
+trim_held          pass       ci
+trim_segment       violation  ci

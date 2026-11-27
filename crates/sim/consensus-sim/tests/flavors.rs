@@ -103,6 +103,19 @@ fn segments_steered() {
 }
 
 #[test]
+fn segment_replicas() {
+    walk(
+        Flavor::segment_replicas(),
+        &[
+            reach::ROLLED,
+            reach::CHAIN_PUBLISHED,
+            reach::HELD_DROP,
+            reach::REPLICA_TRIMMED,
+        ],
+    );
+}
+
+#[test]
 fn leader_handoff() {
     walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }

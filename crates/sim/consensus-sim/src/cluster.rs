@@ -91,6 +91,12 @@ pub mod reach {
     /// values to propose again (`Recovery::pending`), which its tail reads
     /// (R4c).
     pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
+    /// A node dropped the records of a held segment that no `Truncate`
+    /// released: its replicas hold it (R7).
+    pub const HELD_DROP: &str = "cluster: a node dropped a held segment no Truncate released";
+    /// A replica that lagged found its whole segment released at a trim
+    /// jump, and stopped (R6, R7).
+    pub const REPLICA_TRIMMED: &str = "cluster: a lagging replica found its segment released";
     /// A majority of the matchmakers holds a node's publish of the end of a
     /// segment (R5): the chain grows.
     pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
@@ -499,11 +505,23 @@ impl Model for Cluster {
                 self.drain_proxy(id, cx);
             }
             (Party::Replica(id), Wire::Paxos(mut msg)) => {
-                tamper(self.flavor.mutant, &mut msg, true);
+                let mutant = self.flavor.mutant;
+                tamper(mutant, &mut msg, true);
                 let Some(replica) = self.replica_mut(id).live.as_mut() else {
                     return;
                 };
+                forge_release(mutant, &mut msg, replica);
+                let trimmed = replica.is_trimmed();
                 replica.step(msg);
+                // Only a trim point turns a replica trimmed.
+                if replica.is_trimmed() && !trimmed {
+                    let segment = replica
+                        .replica()
+                        .segment_bound()
+                        .expect("a trimmed replica keeps a segment");
+                    self.ledger
+                        .trim_holds(&format!("replica {}", id.0), segment);
+                }
                 self.drain_replica(id, cx);
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
@@ -702,9 +720,24 @@ impl Model for Cluster {
                 ));
             }
         }
-        for site in &self.replicas {
+        // A replica keeps one segment (R6): a sealed one learned all it
+        // keeps once it reached the end of its segment, and one that found
+        // its segment released while it lagged keeps nothing more. A replica
+        // seals only when its walk applies the `Roll` of its segment (R6), so
+        // a sealed one stands at its end and passes by construction; the
+        // check fails only when a walk stops short of its end.
+        for site in self
+            .replicas
+            .iter()
+            .filter(|s| !s.live.as_ref().is_some_and(ReplicaNode::is_trimmed))
+        {
             let reached = site.live.as_ref().map(|r| r.replica().first_unchosen());
-            if reached.is_none_or(|r| r < frontier) {
+            let end = site
+                .live
+                .as_ref()
+                .and_then(|r| r.replica().sealed_end())
+                .map_or(frontier, |end| end.min(frontier));
+            if reached.is_none_or(|r| r < end) {
                 return Err(format!(
                     "replica {} reached {reached:?}, the frontier is {}",
                     site.id.0, frontier.0
@@ -987,6 +1020,9 @@ impl Cluster {
             matchmakers,
             proxy_count: usize::try_from(self.flavor.proxies).expect("a few proxies"),
             replica_count: usize::try_from(self.flavor.replicas).expect("a few replicas"),
+            segment_replicas: self.flavor.segment_replicas.then(|| {
+                ReplicaSet::new((0..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)))
+            }),
             ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
         }
     }
@@ -1487,6 +1523,16 @@ impl Cluster {
                 _ => {}
             }
         }
+        if let Some(node) = self.node(id).live.as_ref() {
+            let journal = node.replica().journal();
+            sometimes!(
+                journal
+                    .held
+                    .is_some_and(|held| held.next_seq > journal.first_seq
+                        && node.acceptor().first_slot() >= held.end),
+                reach::HELD_DROP
+            );
+        }
         let synced = MustSync::for_batch(writes) == MustSync::Sync;
         if synced {
             self.node_mut(id).sync();
@@ -1661,6 +1707,7 @@ impl Cluster {
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             ready.advance();
+            sometimes!(replica.is_trimmed(), reach::REPLICA_TRIMMED);
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
             {
                 self.fold_digest(digest);
@@ -2489,6 +2536,29 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
     }
 }
 
+/// [`Mutant::ForgeTrimRelease`]: a trim point inside the segment that
+/// `replica` keeps, shaped as a release: its state one segment on, as
+/// `CorruptTrimSegment` shapes it, and a head `first_seq` at the next
+/// position of that state. A point of another segment stays as it is, so
+/// the replica never jumps on a forged state.
+fn forge_release(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNode) {
+    if let (
+        Some(Mutant::ForgeTrimRelease),
+        Message::TrimmedTo {
+            point,
+            state,
+            first_seq,
+            ..
+        },
+    ) = (mutant, msg)
+        && state.segment.start < *point
+        && replica.replica().segment_bound() == Some(state.segment.id)
+    {
+        state.segment = state.segment.rolled_at(state.segment.start);
+        *first_seq = (*first_seq).max(state.next_seq);
+    }
+}
+
 /// What the driver reads of a node before its batch: the tracer's view of
 /// its leadership and campaign, and where a GC request goes.
 struct Seen {
@@ -2697,19 +2767,59 @@ fn to_matchmakers<'a>(
     matches.chain(gc)
 }
 
-/// The envelopes of one batch: each audience resolved to parties. A
-/// `Learners` audience reaches the replicas too, as a deployment map
-/// routes it.
 /// The FNV-1a digest of the `Debug` text of `batch`: every field of every
 /// value the core put in it, in order.
 fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     // A journal state with no replica set and no held prefix digests as it
     // did before the fields existed, so the digests of the flavors with no
     // replicas of a segment and no `Hold` stay those of the code before them.
+    // A trim point whose head `first_seq` is its state's digests without
+    // it, for the same reason: the walks that send one digest as they did
+    // before the field existed, and a head that says more is judged.
     let text = format!("{batch:?}")
         .replace(", held: None }", " }")
         .replace(", replicas: None }", " }");
+    let text = without_trim_first_seq(&text);
     fnv1a(paros_consensus::types::FNV_OFFSET, text.as_bytes())
+}
+
+/// `text` without the `, first_seq: Seq(N)` that ends each `TrimmedTo`
+/// whose head `first_seq` is that of its state, the value the field adds
+/// nothing to; a head above it stays in the digest.
+/// That field follows the journal state, so it is the one `first_seq` that
+/// a `}` comes before; the `first_seq` of a journal state follows a `Seq`.
+fn without_trim_first_seq(text: &str) -> String {
+    const FIELD: &str = "}, first_seq: Seq(";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(FIELD) {
+        let tail = &rest[at + FIELD.len()..];
+        let close = tail.find(')').expect("a Seq closes");
+        assert!(
+            tail[..close].bytes().all(|b| b.is_ascii_digit()),
+            "a Seq is a number"
+        );
+        assert!(
+            tail[close + 1..].starts_with(" }"),
+            "first_seq ends a TrimmedTo"
+        );
+        // The state's own `first_seq` is the last one before the field (a
+        // `Hold` has none). A head that carries more than it is digested.
+        let own = rest[..at]
+            .rfind("first_seq: Seq(")
+            .map(|i| &rest[i + "first_seq: Seq(".len()..at])
+            .and_then(|s| s.split(')').next())
+            .expect("a TrimmedTo carries a journal state");
+        if own == &tail[..close] {
+            out.push_str(&rest[..=at]);
+            rest = &tail[close + 1..];
+        } else {
+            out.push_str(&rest[..at + FIELD.len()]);
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The match requests of a batch, without their addressees.

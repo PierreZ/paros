@@ -92,7 +92,9 @@ Deployments (each wires roles and owns one `Ready`):
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
 - `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, and the beat `tick` (re-send page and bounded retention, both from its `Limits`); `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration. `ProxyLeader::new(id, &Config, limits)` reads the bootstrap configuration, the pool and the matchmakers from the deployment's `Config`; a delegation whose configuration it cannot run (outside its pool, or none after a restart) is ignored, and the leader moves the round.
-- `replica_node.rs` → `ReplicaNode`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis; `replica_node/ready.rs` → `ReplicaReady`; `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network; `replica_node/tests/segments.rs` → a replica of one segment: the stop at the `Roll`, the join from the boundary state (`join_segment`, `JoinRefusal`), the sealed answer (`LogRead::Sealed`, `ReplicaReady::sealed_reads`).
+- `replica_node.rs` → `ReplicaNode`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis; `replica_node/ready.rs` → `ReplicaReady`; `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network; `replica_node/tests/segments.rs` → a replica of one segment: the stop at the `Roll`, the join from the boundary state (`join_segment`, `JoinRefusal`), the sealed answer (`LogRead::Sealed`, `ReplicaReady::sealed_reads`), and the replica that lagged
+  while a `Truncate` released its segment (`ReplicaNode::is_trimmed`, from the state and the head
+  `first_seq` of a `TrimmedTo`, `JournalState::releases`).
 
 Test-only:
 

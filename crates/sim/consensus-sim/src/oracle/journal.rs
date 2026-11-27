@@ -123,6 +123,28 @@ impl JournalSpec {
             .map_or_else(|| self.view(), |(before, _)| *before)
     }
 
+    /// The slot after the `Roll` that sealed `segment`, and the next
+    /// position there, once the spec folded that `Roll`.
+    #[must_use]
+    pub fn sealed(&self, segment: SegmentId) -> Option<(u64, u64)> {
+        usize::try_from(segment.0)
+            .ok()
+            .and_then(|k| self.ends.get(k))
+            .copied()
+    }
+
+    /// The `first_seq` of the folded prefix.
+    #[must_use]
+    pub fn first(&self) -> u64 {
+        self.first
+    }
+
+    /// How many slots the spec folded.
+    #[must_use]
+    pub fn folded(&self) -> u64 {
+        self.folded.len() as u64
+    }
+
     fn view(&self) -> JournalView {
         JournalView {
             leader: self.leader,

@@ -619,7 +619,9 @@ impl ColocatedNode {
             } => self.on_commit(from, ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
             Message::CatchUpResponse { from, entries } => self.on_catchup_response(from, entries),
-            Message::TrimmedTo { from, point, state } => self.on_trimmed_to(from, point, state),
+            Message::TrimmedTo {
+                from, point, state, ..
+            } => self.on_trimmed_to(from, point, state),
             Message::Relinquish {
                 from,
                 to,
@@ -662,6 +664,11 @@ impl ColocatedNode {
                 self.on_segment_held(from, segment, end);
             }
         }
+        self.after_step(ticks, marks);
+    }
+
+    /// The end of [`ColocatedNode::step`]: what every message leaves true.
+    fn after_step(&mut self, ticks: u64, marks: invariants::DurableMarks) {
         // A `Prepare` or an `Accept` can raise the promise above the basis
         // of an open read: such a read ends here, before anything serves it.
         self.fence_quorum_reads();

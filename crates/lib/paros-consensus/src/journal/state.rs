@@ -784,6 +784,42 @@ impl JournalState {
             && self.held.is_none_or(|held| self.holds(held))
     }
 
+    /// Whether this state, sealed at a slot past `segment`, proves that every
+    /// write of `segment` lies below `first_seq`, the `first_seq` of a later
+    /// fold of the same log (its head): the state is in a later segment,
+    /// and either every write before it is released (`first_seq` reached
+    /// its `next_seq`), or its held prefix reaches `segment` and every
+    /// write up to the held end is released. A lagging replica of
+    /// `segment` that a trim point past it reaches has nothing left to copy
+    /// (R6 and R7 of `docs/architecture/04-7-segments.md`; its model is
+    /// `TrimProof` of `specs/tla/held-floor-trimmed/`). A `first_seq` below
+    /// the state's own counts as the state's: a later fold never lowers it.
+    ///
+    /// # Panics
+    ///
+    /// If the held prefix ends past the fold: a broken state, a programmer
+    /// error.
+    #[must_use]
+    pub fn releases(&self, segment: SegmentId, first_seq: Seq) -> bool {
+        if self.segment.id <= segment {
+            return false;
+        }
+        let first_seq = first_seq.max(self.first_seq);
+        let all = first_seq >= self.next_seq;
+        let held = self
+            .held
+            .is_some_and(|held| held.segment >= segment && first_seq >= held.next_seq);
+        assert!(
+            self.held.is_none_or(|h| h.next_seq <= self.next_seq),
+            "a held prefix ends inside the fold"
+        );
+        assert!(
+            first_seq >= self.first_seq,
+            "the proof reads a first_seq at or above the state's"
+        );
+        all || held
+    }
+
     /// Whether `held` fits this state as its held prefix: a sealed segment,
     /// whose end and position the fold reached.
     fn holds(&self, held: Hold) -> bool {
