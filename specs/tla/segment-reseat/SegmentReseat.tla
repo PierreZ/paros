@@ -21,10 +21,10 @@
 (* removed member, are `held-reseat/`.                                     *)
 (*                                                                         *)
 (* Constants (each rule with a control):                                   *)
-(*   Route  "fold": the leader routes the `Commit` of slot s only once its *)
-(*          fold applied the slots below s (R4d), to the set that the     *)
-(*          fold names there (the rule). "proposed": a control, it routes  *)
-(*          by the `SetReplicas` that it proposed, before it is chosen.    *)
+(*   Route  "fold": the leader routes the `Commit` of slot s to the set   *)
+(*          that its fold names there now: `Old` until the `SetReplicas`   *)
+(*          is chosen (the rule). "proposed": a control, it routes by the *)
+(*          `SetReplicas` that it proposed, before it is chosen.           *)
 (*   Pull   TRUE: a replica that a set named and that does not know it is  *)
 (*          out pulls the slots it lacks (the rule: a new member joins at  *)
 (*          the start of the segment). FALSE: a control, a replica gets    *)
@@ -57,10 +57,9 @@ VARIABLES
   setVal,   \* slot SetAt holds the `SetReplicas` (once it is chosen)
   holds,    \* holds[r]: the slots that replica r holds
   walk,     \* walk[r]: the end of the contiguous prefix that r walked
-  read,     \* read[q]: the state of the read q of Asks
-  misroute  \* a `Commit` went to a replica that the fold does not name there
+  read      \* read[q]: the state of the read q of Asks
 
-vars == <<chosen, setVal, holds, walk, read, misroute>>
+vars == <<chosen, setVal, holds, walk, read>>
 
 \* The `SetReplicas` is chosen.
 Reseated == SetAt \in chosen /\ setVal
@@ -81,7 +80,6 @@ TypeOK ==
   /\ holds \in [Reps -> SUBSET Slots]
   /\ walk \in [Reps -> 0..N]
   /\ read \in [Asks -> {"none", "asked", "served", "moved"}]
-  /\ misroute \in BOOLEAN
 
 Init ==
   /\ chosen = {}
@@ -89,7 +87,6 @@ Init ==
   /\ holds = [r \in Reps |-> {}]
   /\ walk = [r \in Reps |-> 0]
   /\ read = [q \in Asks |-> "none"]
-  /\ misroute = FALSE
 
 \* Slot s is chosen; at SetAt, the `SetReplicas` (v) or a `Noop` of a new
 \* leader.
@@ -97,20 +94,17 @@ Choose(s, v) ==
   /\ s \notin chosen
   /\ chosen' = chosen \cup {s}
   /\ setVal' = IF s = SetAt THEN v ELSE setVal
-  /\ UNCHANGED <<holds, walk, read, misroute>>
+  /\ UNCHANGED <<holds, walk, read>>
 
-\* The set that the leader routes slot s to, and whether it may route it.
+\* The set that the leader routes slot s to.
 RouteTo(s) == IF Route = "fold" THEN FoldRoute(s)
               ELSE IF s > SetAt THEN New ELSE Old
-RouteReady(s) == Route = "proposed" \/ 1..(s - 1) \subseteq chosen
 
 \* The leader's `Commit` of the chosen slot s reaches replica r.
 Commit(s, r) ==
   /\ s \in chosen
-  /\ RouteReady(s)
   /\ r \in RouteTo(s)
   /\ holds' = [holds EXCEPT ![r] = @ \cup {s}]
-  /\ misroute' = (misroute \/ r \notin FoldRoute(s) \/ ~(1..(s - 1) \subseteq chosen))
   /\ UNCHANGED <<chosen, setVal, walk, read>>
 
 \* Replica r pulls the chosen slot s, from the acceptors or a peer.
@@ -120,27 +114,27 @@ CatchUp(s, r) ==
   /\ r \in WasIn
   /\ ~Out(r)
   /\ holds' = [holds EXCEPT ![r] = @ \cup {s}]
-  /\ UNCHANGED <<chosen, setVal, walk, read, misroute>>
+  /\ UNCHANGED <<chosen, setVal, walk, read>>
 
 \* Replica r walks the next slot of its prefix.
 Walk(r) ==
   /\ walk[r] + 1 \in holds[r]
   /\ walk' = [walk EXCEPT ![r] = @ + 1]
-  /\ UNCHANGED <<chosen, setVal, holds, read, misroute>>
+  /\ UNCHANGED <<chosen, setVal, holds, read>>
 
 \* A reader asks replica r, which a set named, for slot s.
 Ask(q) ==
   /\ read[q] = "none"
   /\ q[1] \in WasIn
   /\ read' = [read EXCEPT ![q] = "asked"]
-  /\ UNCHANGED <<chosen, setVal, holds, walk, misroute>>
+  /\ UNCHANGED <<chosen, setVal, holds, walk>>
 
 \* Replica r serves the read from its walked prefix.
 Serve(q) ==
   /\ read[q] = "asked"
   /\ q[2] <= walk[q[1]]
   /\ read' = [read EXCEPT ![q] = "served"]
-  /\ UNCHANGED <<chosen, setVal, holds, walk, misroute>>
+  /\ UNCHANGED <<chosen, setVal, holds, walk>>
 
 \* A removed member answers a read above the `SetReplicas` with "moved".
 Move(q) ==
@@ -149,7 +143,7 @@ Move(q) ==
   /\ Out(q[1])
   /\ q[2] > SetAt
   /\ read' = [read EXCEPT ![q] = "moved"]
-  /\ UNCHANGED <<chosen, setVal, holds, walk, misroute>>
+  /\ UNCHANGED <<chosen, setVal, holds, walk>>
 
 Next ==
   \/ \E s \in Slots, v \in BOOLEAN : Choose(s, v)
@@ -178,10 +172,6 @@ Sound ==
 
 \* ReadOnce: an answered read keeps its answer.
 ReadOnce == [][\A q \in Asks : read[q] \in {"served", "moved"} => read'[q] = read[q]]_vars
-
-\* Routed: each `Commit` went to the set that the fold names at its slot,
-\* once the slots below it were chosen (R4d).
-Routed == ~misroute
 
 \* Heals: every member of the set in force walks the whole segment, and
 \* every read that a reader asked gets an answer.

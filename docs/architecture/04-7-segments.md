@@ -132,7 +132,7 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 | D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes after this work. `paros-host` is removed | Pierre, 2026-11-24; changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 | D8 | `F` of R7 is the `f` of the acceptor configuration: a held segment survives as many lost replicas as the acceptors of its slots did | Taken on 2026-11-26 under the rule "always take the recommendation" (Pierre, 2026-11-22); Pierre confirmed it on 2026-11-26 ("Go with the rest") |
 | D9 | The floor at `Held` is a decided command, `Command::Hold`, as `Truncate` is: the leader proposes it once its tally saw the segment held, and every node raises its floor where its fold applies it. From the slot of the `Hold`, every node answers a retry of a write below the end of the segment "held". The drop keeps every record that a retry chosen before the `Hold` reads, as the compaction of a `Truncate` does. A floor that each node took from its own tally made two nodes judge one retry two ways (`held-floor/`, the control `hold_tally`) | Taken on 2026-11-26 under the rule "always take the recommendation" (Pierre, 2026-11-22); Pierre confirmed it on 2026-11-26 ("Go with the rest") |
-| D10 | The replica set of the open segment changes by a decided command, `Command::SetReplicas { segment, replicas }`, proposed only by `ColocatedNode::set_replicas` (step 5d of the plan). It is judged at the fold and valid only for the tail segment; from the next slot the leader routes each `Commit` to the new set. A sealed segment's set changes at the matchmakers (R8). A rule that no paper has. Its model is `segment-reseat/`: the leader routes the `Commit` of a slot only once its fold applied the slots below it (R4d), to the set that the fold names there, so the slot after a chosen `SetReplicas` goes to the new set, and a `Noop` that a new leader chose at that slot keeps the old one (control `route_proposed`: a route by the proposed command); a new member of the open segment joins at the start of the segment as any replica of a segment does (`join_segment` from the boundary state of the chain; a new member of the first segment boots with an empty log), pulls the slots below the `SetReplicas` (control `no_pull`), and serves a read only from its own contiguous prefix (the read rule of `compartments/`); a removed member that walked the `SetReplicas` knows that its segment ends there for it: it pulls no more and answers a read above it with "moved", as a replica past its `Roll` answers "sealed" (control `no_moved`: the read waits for ever). The held tally across the change is `held-reseat/`. **Open** (step 5d): the pull of a new member asks the peers of the set in force, which its base does not name; `peer-pull/` checks the pull over one fixed set | Pierre, 2026-11-26: the mechanism confirmed ("Go with the rest"), the name `SetReplicas` chosen; the "moved" answer and the model are a recommendation of 2026-11-27, which Pierre may overrule |
+| D10 | The replica set of the open segment changes by a decided command, `Command::SetReplicas { segment, replicas }`, proposed only by `ColocatedNode::set_replicas` (step 5d of the plan). It is judged at the fold and valid only for the tail segment; from the next slot the leader routes each `Commit` to the new set. A sealed segment's set changes at the matchmakers (R8). A rule that no paper has. Its model is `segment-reseat/`: the leader routes the `Commit` of a slot to the set that its fold names there now, so a slot above a chosen `SetReplicas` goes to the new set, and a slot that it routes before the `SetReplicas` is chosen goes to the old set (the new member pulls it); the control `route_proposed` routes by the proposed command, and the new member then holds a slot that no chosen set names (a `Noop` that a new leader chose at that slot keeps it out for good). A new member of the open segment pulls the slots that it lacks (control `no_pull`), and serves a read only from its own contiguous prefix; in the model a pull is one step, and its sources are checked by `held-floor/` and `peer-pull/`. How it joins is the join of any replica of a segment, checked by `compartments/`: `join_segment` from the boundary state of the chain, and a new member of the first segment boots with an empty log. A removed member that walked the `SetReplicas` knows that its segment ends there for it: it pulls no more and answers a read above it with "moved", as a replica past its `Roll` answers "sealed" (control `no_moved`: the read waits for ever). The held tally across the change is `held-reseat/`. **Open** (step 5d): the pull of a new member asks the peers of the set in force, which its base does not name; `peer-pull/` checks the pull over one fixed set | Pierre, 2026-11-26: the mechanism confirmed ("Go with the rest"), the name `SetReplicas` chosen; the "moved" answer and the model are a recommendation of 2026-11-27, which Pierre may overrule |
 
 #### 4.7.3 Rules
 
@@ -274,10 +274,11 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   segment that another leader held. The rule covers that segment only once it is released; the
   model has one `held` set for every leader and does not show the case. The fold checks the end and the position of a `Hold`
   against bounds, not against the exact values of its segment, and the drop needs them exact.
-  They are exact by where they come from: the leader takes them from its own fold of the chosen
-  prefix (`HeldTally::note`, which asserts that one segment is sealed one way, R3), and the
-  model `held-floor-hold/` gives a `Hold` only its segment, its end being the one of the log.
-  The oracle of consensus-sim checks them exact. An exact check at the fold would make the
+  They are exact by where they come from: the leader proposes a `Hold` only for a segment whose
+  `Roll` its fold noted, with the end and the position of that fold (`note_folded_rolls` and
+  `HeldTally::note`, which asserts that one segment is sealed one way, R3), and a `Roll` does not
+  move `next_seq`. The model `held-floor-hold/` assumes the same: a `Hold` names only its
+  segment, and its end is the one of the log. The oracle of consensus-sim checks them exact. An exact check at the fold would make the
   journal state keep the end and the position of every sealed segment that is not yet held, a
   list with no bound, on the wire of a trim-point jump, to guard only against a bug of the
   leader. So the fold keeps its bounds (a recommendation of 2026-11-27, which Pierre may
@@ -336,7 +337,8 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
     `SetReplicas` and the join of a new replica are `segment-reseat/` (D10).
   - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
     the leader's fold does not see. The tally and the route must learn the new set from the
-    chain. `specs/tla/heal-learn/` checks a proposed rule: the leader and the new replica read
+    chain. `specs/tla/heal-learn/` checks the liveness of a proposed rule, not its safety (the
+    tally across the heal is `held-reseat/`): the leader and the new replica read
     the heal from the chain on each beat, so the tally judges the segment over the healed set
     through changes of leader (controls: only the node that ran the `Decree` learns it, `own`;
     a read only at an election or a boot, `election`). How the answers of the matchmakers carry
@@ -348,7 +350,10 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
     controller (§4.8) orders the heal, as it orders the replacement of a silent acceptor: it
     changes the set, and the core does not. The leader node carries the order: it runs the
     `Decree` at the matchmakers, as it runs a reconfiguration, and refuses it unless the segment
-    is sealed and the replica that the order removes is in the set in force. The tally of the
+    is sealed and the replica that the order removes is in the set in force. It needs no proven
+    leadership (the `Unproven` refusal of a reconfiguration, §4.8): the `Decree` is a single
+    decree of its own at the matchmakers, so a node that lost its leadership can only decide the
+    heal that the order asked for, and a heal stalls no campaign. The tally of the
     leader, the route of a pull and the new replica learn the healed set from the chain, never
     from the order: a leader that ran the `Decree` can lose its leadership before the `Decree`
     is decided, and the next leader did not see it. The liveness of that learning is the Open

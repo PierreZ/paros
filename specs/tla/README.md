@@ -2990,20 +2990,21 @@ before a set can change.
 
 D10 of `docs/architecture/04-7-segments.md`: the decided command `SetReplicas` at slot `SetAt`
 replaces the set `Old` of the open segment by `New`. `SegmentReseat.tla` checks three rules
-across the change. The leader routes the `Commit` of a slot only once its fold applied the slots
-below it (R4d), to the set that the fold names there (`Routed`). A new member joins at the start
-of the segment and pulls the slots below the `SetReplicas`. A removed member that walked the
-`SetReplicas` pulls no more and answers a read above it with "moved". The slots are chosen in any
-order, and slot `SetAt` holds the `SetReplicas` or a `Noop` of a new leader. `Sound` is the
-safety (a replica holds only chosen slots, and only a replica that a set named holds any; a read
-is served from the walked prefix); `Whole` and `Answered` are the liveness, under fair steps. The
-rule is a proposal, modelled and not built: `Command::SetReplicas` is not in the code yet.
+across the change. The leader routes the `Commit` of a slot to the set that its fold names there
+now. A new member pulls the slots that it lacks; a pull is one step here, and its sources are
+checked by `held-floor/` and `peer-pull/`. A removed member that walked the `SetReplicas` pulls
+no more and answers a read above it with "moved". The slots are chosen in any order, and slot
+`SetAt` holds the `SetReplicas` or a `Noop` of a new leader. `Sound` is the safety (a replica
+holds only chosen slots, and only a replica that a set named holds any; a read is served from the
+walked prefix); `Whole` and `Answered` are the liveness, under fair steps. The join from the
+boundary state of the chain is `compartments/`. The rule is a proposal, modelled and not built:
+`Command::SetReplicas` is not in the code yet.
 
 | Check | CI | Result |
 |---|---|---|
-| `reseat` | ci | pass of `Sound`, `Routed`, `Whole`, `Answered` and `ReadOnce` (an answered read keeps its answer): `SetReplicas` at slot 2 replaces `a` by `c` (0.11 million distinct states) |
+| `reseat` | ci | pass of `Sound`, `Whole`, `Answered` and `ReadOnce` (an answered read keeps its answer): `SetReplicas` at slot 2 replaces `a` by `c` (0.11 million distinct states) |
 | `reach_moved` | ci | violation of `NoMoved`: the removed `a` answers a read with "moved" |
-| `route_proposed` | ci | violation of `Routed`: the control `Route = "proposed"` routes by the proposed `SetReplicas`, before it is chosen |
+| `route_proposed` | ci | violation of `Sound`: the control `Route = "proposed"` routes by the proposed `SetReplicas`, before it is chosen; the new `c` holds a slot that no chosen set names |
 | `no_pull` | ci | violation of `Whole`: the control `Pull = FALSE`; the new `c` never gets the slots below the `SetReplicas` |
 | `no_moved` | ci | violation of `Answered`: the control `Moved = FALSE`; a read of slot 3 at the removed `a` waits for ever |
 
@@ -3020,7 +3021,9 @@ of the log does not see it. `HealLearn.tla` checks that the tally of the leader 
 segment over the healed set (`Heals`), through changes of leader that empty the tally, while the
 new replica must learn that the set names it before it pulls the segment and reports it. The
 rule (`Learn = "beat"`): the leader and the new replica read the heal from the chain on each
-beat. A proposed rule, modelled and not built.
+beat. The model checks liveness only: the controls show that a read on each beat is enough, and
+the safety of the tally across the heal is `held-reseat/`. A proposed rule, modelled and not
+built.
 
 | Check | CI | Result |
 |---|---|---|
