@@ -97,6 +97,9 @@ pub mod reach {
     /// A replica that lagged found its whole segment released at a trim
     /// jump, and stopped (R6, R7).
     pub const REPLICA_TRIMMED: &str = "cluster: a lagging replica found its segment released";
+    /// A replica of a segment lags below the floor of every node, and the
+    /// segment is not released: only a peer replica can serve it (R8).
+    pub const PEER_ONLY: &str = "cluster: a replica lags below every node's floor";
     /// A majority of the matchmakers holds a node's publish of the end of a
     /// segment (R5): the chain grows.
     pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
@@ -608,7 +611,9 @@ impl Model for Cluster {
                 }
             }
             Party::Replica(id) => {
-                if self.replica(id).live.is_none() {
+                if self.replica(id).live.is_none()
+                    && !(self.is_sleeper(id) && cx.phase() != Phase::Settle)
+                {
                     let limits = self.flavor.limits;
                     let admitted: Vec<NodeId> = self.admitted(id).into_iter().collect();
                     let site = self.replica_mut(id);
@@ -861,6 +866,11 @@ impl Cluster {
                 ReplicaSite::new(id, cluster.party_config(id), cluster.flavor.limits)
             })
             .collect();
+        for site in &mut cluster.replicas {
+            if cluster.flavor.sleeper && site.id.0 + 1 == REPLICA_BASE + cluster.flavor.replicas {
+                site.live = None;
+            }
+        }
         let bootstrap = cluster.bootstrap_matchmakers();
         cluster.matchmakers = cluster
             .matchmaker_ids()
@@ -1069,6 +1079,12 @@ impl Cluster {
 
     fn proxy_mut(&mut self, id: ProxyId) -> &mut ProxySite {
         &mut self.proxies[Self::index(id.0)]
+    }
+
+    /// Whether `id` is the replica site that [`Flavor::sleeper`] keeps down
+    /// until the settle rounds.
+    fn is_sleeper(&self, id: NodeId) -> bool {
+        self.flavor.sleeper && id.0 + 1 == REPLICA_BASE + self.flavor.replicas
     }
 
     fn replica(&self, id: NodeId) -> &ReplicaSite {
@@ -1688,8 +1704,26 @@ impl Cluster {
 
     fn drain_replica(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let pool = self.pool.clone();
+        // A replica pages its peers of a segment, which are replica sites.
+        let replicas = self.replica_ids();
         let who = format!("replica {}", id.0);
         for _ in 0..DRAIN_LIMIT {
+            // Every running node dropped the records that the replica still
+            // misses, at the `Hold` of its segment that no `Truncate`
+            // released: only a peer replica holds them.
+            let past = self.replica(id).live.as_ref().is_some_and(|r| {
+                let (bound, behind) = (r.replica().segment_bound(), r.replica().first_unchosen());
+                bound.is_some_and(|k| {
+                    self.nodes.iter().any(|s| s.live.is_some())
+                        && self.nodes.iter().filter_map(|s| s.live.as_ref()).all(|n| {
+                            let journal = n.replica().journal();
+                            n.acceptor().first_slot() > behind
+                                && journal.held.is_some_and(|h| {
+                                    h.segment >= k && h.next_seq > journal.first_seq
+                                })
+                        })
+                })
+            });
             let site = self.replica_mut(id);
             let Some(replica) = site.live.as_mut() else {
                 return;
@@ -1703,11 +1737,13 @@ impl Cluster {
                 ready.read_states(),
             ));
             let writes = ready.writes().to_vec();
-            let out = route(ready.messages(), &pool, Some(id), &[]);
+            let out = route(ready.messages(), &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             ready.advance();
             sometimes!(replica.is_trimmed(), reach::REPLICA_TRIMMED);
+            let open = !replica.replica().is_sealed() && !replica.is_trimmed();
+            sometimes!(open && past, reach::PEER_ONLY);
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
             {
                 self.fold_digest(digest);
@@ -1769,6 +1805,11 @@ impl Cluster {
     fn tick_all(&mut self, cx: &mut Cx<'_, Self>) {
         if cx.phase() == Phase::Settle {
             self.admit_all();
+            for id in self.replica_ids() {
+                if self.is_sleeper(id) {
+                    self.restart(&Party::Replica(id), cx);
+                }
+            }
         }
         self.step_down_after_compaction(cx);
         for i in 0..self.proxies.len() {

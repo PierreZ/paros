@@ -17,7 +17,9 @@
 //! acceptors — adding a replica adds read capacity, never a vote.
 //!
 //! - **In:** `Commit` (from a leader or a proxy leader, the two alike), the
-//!   `CatchUpResponse` its own requests draw, the `TrimmedTo` a peer serves
+//!   `CatchUpResponse` its own requests draw (from a pooled node or a peer
+//!   replica of its segment), the `CatchUpRequest` of a peer replica of its
+//!   segment, the `TrimmedTo` a peer serves
 //!   when it asked below that peer's trim point, `Heartbeat` — for the
 //!   commit watermark, the leader hint and, on a matchmaker deployment, the
 //!   configuration in force, never the ballot — and the `PreReadAck`s its
@@ -27,9 +29,15 @@
 //!   ahead of this replica's prefix, and on the driver's tick while a faulty
 //!   record is open; `PreRead`, to a row of acceptors, for a quorum read;
 //!   `SegmentHeld`, to the beat's sender, once sealed with its whole
-//!   segment on a matchmaker deployment (R7 of §4.7). A
-//!   replica serves no peer: healing it is the acceptors' job, as healing a
-//!   lagging acceptor is.
+//!   segment on a matchmaker deployment (R7 of §4.7). A lagging replica is
+//!   healed by the acceptors, as a lagging acceptor is, until they drop its
+//!   segment at the `Hold`. Then a trim point of a later segment that
+//!   proves nothing released makes it pull from the next peer of its
+//!   segment's set (`CatchUpRequest` to [`Audience::ReplicasOf`] that one
+//!   peer), and a peer answers with the records it holds, contiguous from
+//!   the asked slot (`CatchUpResponse`, R8). Every record a replica holds is
+//!   chosen, so a peer is a safe source (`CanCopy` of
+//!   `specs/tla/held-floor/HeldFloor.tla`).
 //! - **Reads:** the journal read ([`ReplicaNode::read_log`], #185) is served
 //!   from this replica's own chosen prefix, so read load leaves the
 //!   acceptors; the leaderless read (§3.4, the paper's own reader,
@@ -135,6 +143,7 @@ use crate::contract::limits::{CATCHUP_BATCH, READ_TTL_TICKS};
 use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
+use crate::journal::segment::ReplicaSet;
 use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
 use crate::membership::{AcceptorConfig, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
@@ -167,6 +176,11 @@ pub struct ReplicaCounters {
     /// Slots and trim points past the end of the segment this replica
     /// keeps, or of another segment (R6): not this replica's.
     pub past_end: u64,
+    /// `CatchUpRequest`s sent to a peer replica of the segment (R8): the
+    /// acceptors dropped records this replica misses.
+    pub peer_pulls: u64,
+    /// Pages of the segment served to a peer replica (R8).
+    pub peer_pages: u64,
 }
 
 /// Why [`ReplicaNode::join_segment`] refused a join.
@@ -243,6 +257,10 @@ pub struct ReplicaNode {
     /// it. It has nothing left to copy: it pulls nothing and serves no read.
     /// Volatile: after a boot, the next trim jump proves it again.
     trimmed: bool,
+    /// How many pulls this replica sent to its peers (R8): the next pull
+    /// goes to the next peer of the set, so a peer that is down or holds
+    /// less is not asked forever. Volatile.
+    peer_turn: u64,
 }
 
 impl ReplicaNode {
@@ -343,6 +361,7 @@ impl ReplicaNode {
             pending_sealed_reads: Vec::new(),
             counters: ReplicaCounters::default(),
             catchup_asked: None,
+            peer_turn: 0,
             trimmed: false,
         };
         for (slot, record) in above {
@@ -429,8 +448,14 @@ impl ReplicaNode {
                     self.counters.ignored += 1;
                 }
             }
+            // A peer of the segment pulls what the acceptors dropped (R8).
+            Message::CatchUpRequest { from, from_slot } if self.is_segment_peer(from) => {
+                self.serve_peer(from, from_slot);
+            }
             Message::CatchUpResponse { from, entries } => {
-                if self.in_pool(from) && entries.len() <= CATCHUP_BATCH {
+                if (self.in_pool(from) || self.is_segment_peer(from))
+                    && entries.len() <= CATCHUP_BATCH
+                {
                     for (slot, (ballot, command)) in entries {
                         self.learn(slot, ballot, &command);
                     }
@@ -930,6 +955,19 @@ impl ReplicaNode {
                     self.replica.segment_bound() == Some(bound),
                     "a trimmed replica keeps the segment it found released"
                 );
+            } else if self
+                .replica
+                .segment_bound()
+                .is_some_and(|bound| state.segment.id > bound)
+                && !self.replica.is_sealed()
+                && !self.trimmed
+                && !self.is_segment_peer(from)
+            {
+                // The acceptors dropped the segment at its `Hold`: its peers
+                // hold it (R7), and the copy comes from one of them (R8). A
+                // trim point from a peer (a node that a `Roll` named) is the
+                // answer to a pull, and asks no more: the next beat pulls.
+                self.request_peer_catch_up();
             }
             return;
         }
@@ -1024,6 +1062,126 @@ impl ReplicaNode {
             "an open request asks for a slot the replica misses"
         );
         self.catchup_asked
+    }
+
+    /// The other replicas of the segment this replica keeps (R8): the set
+    /// that its base names (the `Roll` that opened the segment), else the
+    /// bootstrap set of the first segment. Empty when it keeps no segment.
+    fn segment_peers(&self) -> Vec<NodeId> {
+        if self.replica.segment_bound().is_none() {
+            return Vec::new();
+        }
+        let base = self.replica.journal_base();
+        let set = base
+            .replicas
+            .as_ref()
+            .or(self.config.segment_replicas.as_ref());
+        let peers: Vec<NodeId> = set.map_or_else(Vec::new, |set| {
+            set.members()
+                .iter()
+                .copied()
+                .filter(|n| *n != self.config.id)
+                .collect()
+        });
+        assert!(
+            !peers.contains(&self.config.id),
+            "a replica is not its own peer"
+        );
+        peers
+    }
+
+    pub(crate) fn is_segment_peer(&self, id: NodeId) -> bool {
+        let peer = self.segment_peers().contains(&id);
+        assert!(
+            !peer || id != self.config.id,
+            "a replica is never its own peer"
+        );
+        peer
+    }
+
+    /// Pull the slots this replica misses from the next peer of its
+    /// segment (R8 of `docs/architecture/04-7-segments.md`): the acceptors
+    /// dropped them at the segment's `Hold`, and its peers hold them. A
+    /// peer serves only chosen records, so any peer is a safe source; the
+    /// turn moves on at each pull, so every peer is asked in time
+    /// (`CanCopy` of `specs/tla/held-floor/HeldFloor.tla`).
+    fn request_peer_catch_up(&mut self) {
+        let peers = self.segment_peers();
+        let Some(bound) = self.replica.segment_bound() else {
+            return;
+        };
+        if peers.is_empty() {
+            return;
+        }
+        assert!(!self.trimmed, "a trimmed replica pulls nothing");
+        assert!(!self.replica.is_sealed(), "a sealed replica pulls nothing");
+        let count = peers.len() as u64;
+        let to = peers[usize::try_from(self.peer_turn % count).expect("a small set")];
+        assert!(to != self.config.id, "a replica never pulls from itself");
+        self.peer_turn += 1;
+        probe!(
+            reachable,
+            "replica: a lagging replica pulls its segment from a peer"
+        );
+        self.counters.peer_pulls += 1;
+        self.pending_messages.push((
+            Audience::ReplicasOf {
+                segment: bound,
+                replicas: ReplicaSet::new([to]),
+            },
+            Message::CatchUpRequest {
+                from: self.config.id,
+                from_slot: self.catch_up_need(),
+            },
+        ));
+    }
+
+    /// Serve a peer of the segment (R8): the records this replica holds,
+    /// contiguous from `from_slot`, at most a page. Every record it holds
+    /// is chosen, so the peer learns only chosen values. A request below
+    /// this replica's floor, or from a slot it does not hold, gets nothing:
+    /// the peer asks the next peer.
+    fn serve_peer(&mut self, to: NodeId, from_slot: Slot) {
+        let Some(bound) = self.replica.segment_bound() else {
+            return;
+        };
+        if self.trimmed || from_slot < self.floor {
+            return;
+        }
+        let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
+        let mut expected = from_slot;
+        for (slot, record) in self.records.range(from_slot..) {
+            if *slot != expected || entries.len() >= CATCHUP_BATCH {
+                break;
+            }
+            entries.insert(*slot, record.clone());
+            expected = Slot(slot.0 + 1);
+        }
+        if entries.is_empty() {
+            return;
+        }
+        assert!(
+            entries.keys().all(|slot| self.replica.is_chosen(*slot)),
+            "a replica serves only chosen records"
+        );
+        assert!(
+            entries
+                .first_key_value()
+                .is_some_and(|(s, _)| *s == from_slot),
+            "a page starts where the peer asked"
+        );
+        probe!(reachable, "replica: a replica serves a peer of its segment");
+        self.counters.peer_pages += 1;
+        self.pending_messages.push((
+            Audience::ReplicasOf {
+                segment: bound,
+                replicas: ReplicaSet::new([to]),
+            },
+            Message::CatchUpResponse {
+                from: self.config.id,
+                entries,
+            },
+        ));
     }
 
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
@@ -1241,13 +1399,16 @@ impl ReplicaNode {
             "a replica never emits an acceptor write"
         );
         assert!(
-            self.pending_messages.iter().all(|(_, m)| matches!(
-                m,
+            self.pending_messages.iter().all(|(audience, m)| match m {
                 Message::CatchUpRequest { .. }
-                    | Message::PreRead { .. }
-                    | Message::SegmentHeld { .. }
-            )),
-            "a replica sends nothing but catch-up requests, pre-reads and held reports"
+                | Message::PreRead { .. }
+                | Message::SegmentHeld { .. } => true,
+                Message::CatchUpResponse { .. } => {
+                    matches!(audience, Audience::ReplicasOf { .. })
+                }
+                _ => false,
+            }),
+            "a replica sends nothing but catch-up requests, pre-reads, held reports and pages to its peers"
         );
         assert!(
             self.pending_messages.iter().all(|(_, m)| match m {

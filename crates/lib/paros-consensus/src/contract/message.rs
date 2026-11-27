@@ -103,8 +103,10 @@ pub enum Audience {
     /// The replicas of one segment (R6 of `docs/architecture/04-7-segments.md`
     /// §4.7): the `Commit` of a slot of `segment`, which a leader sends once
     /// its own fold applied every slot below it (R4d), so the segment is the
-    /// true one. The [`crate::ReplicaNode`]s it names are outside the pool;
-    /// the driver's deployment map resolves each id as it resolves a node.
+    /// true one; and the pull between two replicas of one segment (R8), a
+    /// `CatchUpRequest` or a `CatchUpResponse` to the one peer it names. The
+    /// [`crate::ReplicaNode`]s it names are outside the pool; the driver's
+    /// deployment map resolves each id as it resolves a node.
     ReplicasOf {
         /// The segment of the slot.
         segment: SegmentId,

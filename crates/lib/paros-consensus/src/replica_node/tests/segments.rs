@@ -7,7 +7,7 @@ use super::config;
 use crate::contract::config::Config;
 use crate::contract::limits::Limits;
 use crate::contract::mem_storage::MemStorage;
-use crate::contract::message::{Message, Party};
+use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
 use crate::journal::segment::{Roll, Segment, SegmentId};
@@ -667,4 +667,136 @@ fn a_lagging_replica_of_a_released_segment_stops() {
             "a trimmed replica opens no read"
         );
     }
+}
+
+/// A replica of a segment `id`, multi-writer, whose set is `10` and `11`.
+fn peer_config(id: u64) -> Config {
+    Config {
+        segment_replicas: Some(crate::journal::segment::ReplicaSet::new([
+            NodeId(10),
+            NodeId(11),
+        ])),
+        ..Config {
+            id: NodeId(id),
+            ..multi()
+        }
+    }
+}
+
+/// The messages of one batch, persisted on `disk` and acknowledged.
+fn sent(replica: &mut ReplicaNode, disk: &mut MemStorage) -> Vec<(Audience, Message)> {
+    let ready = replica.ready();
+    disk.apply(ready.writes());
+    let out = ready.messages().to_vec();
+    ready.advance();
+    out
+}
+
+/// A lagging replica of a segment that its peer holds gets a trim point of
+/// the next segment that proves nothing released: the acceptors dropped the
+/// segment at its `Hold`. It pulls the segment from its peer, which serves
+/// its records, and it seals (R8 of §4.7). A party outside the set gets
+/// nothing, and a sealed replica pulls nothing more.
+#[test]
+fn a_lagging_replica_pulls_its_segment_from_a_peer() {
+    let mut peer_disk = MemStorage::new(peer_config(11));
+    let mut peer = ReplicaNode::new(&peer_disk, Limits::DEFAULT);
+    peer.step(commit(0, write(7)));
+    peer.step(commit(1, roll(1)));
+    let _ = drain(&mut peer, &mut peer_disk);
+    assert_eq!(peer.replica().sealed_end(), Some(Slot(2)));
+
+    let mut disk = MemStorage::new(peer_config(10));
+    let mut laggard = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert!(!boundary().releases(SegmentId::FIRST, Seq(0)));
+    laggard.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(3),
+        state: boundary(),
+        first_seq: Seq(0),
+    });
+    assert!(!laggard.is_trimmed());
+    let pulls = sent(&mut laggard, &mut disk);
+    let to_peer = Audience::ReplicasOf {
+        segment: SegmentId::FIRST,
+        replicas: crate::journal::segment::ReplicaSet::new([NodeId(11)]),
+    };
+    assert_eq!(
+        pulls,
+        vec![(
+            to_peer,
+            Message::CatchUpRequest {
+                from: NodeId(10),
+                from_slot: Slot(0),
+            }
+        )]
+    );
+    assert_eq!(laggard.counters().peer_pulls, 1);
+
+    // A party outside the set is not served, and the peer answers its own.
+    peer.step(Message::CatchUpRequest {
+        from: NodeId(12),
+        from_slot: Slot(0),
+    });
+    assert_eq!(sent(&mut peer, &mut peer_disk), Vec::new());
+    peer.step(pulls[0].1.clone());
+    let pages = sent(&mut peer, &mut peer_disk);
+    assert_eq!(pages.len(), 1);
+    assert_eq!(peer.counters().peer_pages, 1);
+    let (audience, page) = pages[0].clone();
+    assert_eq!(
+        audience,
+        Audience::ReplicasOf {
+            segment: SegmentId::FIRST,
+            replicas: crate::journal::segment::ReplicaSet::new([NodeId(10)]),
+        }
+    );
+    let Message::CatchUpResponse { from, entries } = &page else {
+        panic!("a peer answers with a page, got {page:?}");
+    };
+    assert_eq!(*from, NodeId(11));
+    assert_eq!(
+        entries.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(0), Slot(1)]
+    );
+
+    // A page from outside the set teaches nothing; the peer's page seals.
+    let ignored = laggard.counters().ignored;
+    laggard.step(Message::CatchUpResponse {
+        from: NodeId(12),
+        entries: entries.clone(),
+    });
+    assert_eq!(laggard.counters().ignored, ignored + 1);
+    laggard.step(page);
+    assert_eq!(drain(&mut laggard, &mut disk), vec![Slot(0), Slot(1)]);
+    assert_eq!(laggard.replica().sealed_end(), Some(Slot(2)));
+    assert_eq!(laggard.chosen_at(Slot(0)), Some(&write(7)));
+
+    // Sealed, it pulls nothing more on the next trim point.
+    laggard.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(3),
+        state: boundary(),
+        first_seq: Seq(0),
+    });
+    assert_eq!(sent(&mut laggard, &mut disk), Vec::new());
+    assert_eq!(laggard.counters().peer_pulls, 1);
+}
+
+/// With no peer in its set, a lagging replica has no one to pull from.
+#[test]
+fn a_replica_alone_in_its_set_pulls_from_no_peer() {
+    let mut disk = MemStorage::new(Config {
+        segment_replicas: Some(crate::journal::segment::ReplicaSet::new([NodeId(10)])),
+        ..multi()
+    });
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(3),
+        state: boundary(),
+        first_seq: Seq(0),
+    });
+    assert_eq!(sent(&mut replica, &mut disk), Vec::new());
+    assert_eq!(replica.counters().peer_pulls, 0);
 }
