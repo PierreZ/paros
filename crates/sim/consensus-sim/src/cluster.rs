@@ -505,10 +505,12 @@ impl Model for Cluster {
                 self.drain_proxy(id, cx);
             }
             (Party::Replica(id), Wire::Paxos(mut msg)) => {
-                tamper(self.flavor.mutant, &mut msg, true);
+                let mutant = self.flavor.mutant;
+                tamper(mutant, &mut msg, true);
                 let Some(replica) = self.replica_mut(id).live.as_mut() else {
                     return;
                 };
+                forge_release(mutant, &mut msg, replica);
                 let trimmed = replica.is_trimmed();
                 replica.step(msg);
                 // Only a trim point turns a replica trimmed.
@@ -2523,21 +2525,6 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
             state.next_seq = Seq(state.next_seq.0 + 1);
         }
-        // A trim point inside the replica's segment, shaped as a release:
-        // its state one segment on, as `CorruptTrimSegment` shapes it, and a
-        // head `first_seq` at the next position of that state.
-        (
-            Some(Mutant::ForgeTrimRelease),
-            Message::TrimmedTo {
-                point,
-                state,
-                first_seq,
-                ..
-            },
-        ) if to_replica && state.segment.start < *point => {
-            state.segment = state.segment.rolled_at(state.segment.start);
-            *first_seq = (*first_seq).max(state.next_seq);
-        }
         // A tail one segment ahead, shaped as a real one: segment `k + 1`
         // opened at the slot after the start of `k`, still below the point.
         (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { point, state, .. })
@@ -2546,6 +2533,29 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
             state.segment = state.segment.rolled_at(state.segment.start);
         }
         _ => {}
+    }
+}
+
+/// [`Mutant::ForgeTrimRelease`]: a trim point inside the segment that
+/// `replica` keeps, shaped as a release: its state one segment on, as
+/// `CorruptTrimSegment` shapes it, and a head `first_seq` at the next
+/// position of that state. A point of another segment stays as it is, so
+/// the replica never jumps on a forged state.
+fn forge_release(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNode) {
+    if let (
+        Some(Mutant::ForgeTrimRelease),
+        Message::TrimmedTo {
+            point,
+            state,
+            first_seq,
+            ..
+        },
+    ) = (mutant, msg)
+        && state.segment.start < *point
+        && replica.replica().segment_bound() == Some(state.segment.id)
+    {
+        state.segment = state.segment.rolled_at(state.segment.start);
+        *first_seq = (*first_seq).max(state.next_seq);
     }
 }
 
@@ -2763,9 +2773,9 @@ fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     // A journal state with no replica set and no held prefix digests as it
     // did before the fields existed, so the digests of the flavors with no
     // replicas of a segment and no `Hold` stay those of the code before them.
-    // A trim point digests without the sender's head `first_seq`, the last
-    // field of a `TrimmedTo`, for the same reason: the walks that send one
-    // digest as they did before the field existed.
+    // A trim point whose head `first_seq` is its state's digests without
+    // it, for the same reason: the walks that send one digest as they did
+    // before the field existed, and a head that says more is judged.
     let text = format!("{batch:?}")
         .replace(", held: None }", " }")
         .replace(", replicas: None }", " }");
@@ -2773,7 +2783,9 @@ fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     fnv1a(paros_consensus::types::FNV_OFFSET, text.as_bytes())
 }
 
-/// `text` without the `, first_seq: Seq(N)` that ends each `TrimmedTo`.
+/// `text` without the `, first_seq: Seq(N)` that ends each `TrimmedTo`
+/// whose head `first_seq` is that of its state, the value the field adds
+/// nothing to; a head above it stays in the digest.
 /// That field follows the journal state, so it is the one `first_seq` that
 /// a `}` comes before; the `first_seq` of a journal state follows a `Seq`.
 fn without_trim_first_seq(text: &str) -> String {
@@ -2791,8 +2803,20 @@ fn without_trim_first_seq(text: &str) -> String {
             tail[close + 1..].starts_with(" }"),
             "first_seq ends a TrimmedTo"
         );
-        out.push_str(&rest[..=at]);
-        rest = &tail[close + 1..];
+        // The state's own `first_seq` is the last one before the field (a
+        // `Hold` has none). A head that carries more than it is digested.
+        let own = rest[..at]
+            .rfind("first_seq: Seq(")
+            .map(|i| &rest[i + "first_seq: Seq(".len()..at])
+            .and_then(|s| s.split(')').next())
+            .expect("a TrimmedTo carries a journal state");
+        if own == &tail[..close] {
+            out.push_str(&rest[..=at]);
+            rest = &tail[close + 1..];
+        } else {
+            out.push_str(&rest[..at + FIELD.len()]);
+            rest = tail;
+        }
     }
     out.push_str(rest);
     out
