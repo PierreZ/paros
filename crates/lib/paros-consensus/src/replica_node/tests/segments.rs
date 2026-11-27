@@ -576,3 +576,21 @@ fn a_compacted_or_plain_replica_reports_nothing() {
     assert!(plain.replica().is_sealed());
     assert_eq!(reports(&mut plain, &mut disk), []);
 }
+
+/// A replica whose chosen slot rotted on its disk boots with no record and
+/// no fold, and still knows the slot chosen: it is not fresh.
+#[test]
+fn a_replica_with_a_rotted_chosen_slot_does_not_join() {
+    let mut disk = MemStorage::new(multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    let _ = drain(&mut replica, &mut disk);
+    let _ = disk.rot(Slot(0));
+    let mut rebooted = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert_eq!(rebooted.replica().chosen_index(), Some(Slot(0)));
+    assert_eq!(rebooted.replica().folded(), Slot(0));
+    assert_eq!(
+        rebooted.join_segment(Slot(2), boundary()),
+        Err(JoinRefusal::NotFresh)
+    );
+}

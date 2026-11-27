@@ -228,7 +228,7 @@ impl Config {
     #[must_use]
     pub fn recorded(&self) -> Self {
         // Two assignments, not a struct update: cargo-mutants 27.1 deletes
-        // each field of a struct update in every run, whatever `--re`
+        // the fields of this struct update in every run, whatever `--re`
         // says, which adds those mutants to each second pass of
         // `scripts/mutants.sh`.
         let mut recorded = self.clone();

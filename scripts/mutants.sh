@@ -93,8 +93,8 @@ run --config "$second" --baseline skip --timeout "$timeout" -j 1 "${filters[@]}"
 
 # cargo-mutants 27.1 keeps the struct-field deletions of the package whatever
 # `--re` says, so the second pass could test mutants that the first pass
-# caught. The core writes no struct update (the `checks` job of `rust.yml`
-# lists the mutants that ignore `--re`, and fails on one), so there are none.
+# caught. The `checks` job of `rust.yml` lists the mutants that ignore `--re`,
+# and fails on one, so there are none.
 # A survivor is a mutant that both passes missed.
 grep -Fxf mutants.first/missed.txt mutants.out/missed.txt > survivors.txt || true
 echo "Survivors: $(wc -l < survivors.txt)."
