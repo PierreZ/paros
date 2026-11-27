@@ -97,7 +97,9 @@ that only a minority took is already true, the map across a handover), the floor
 held segment (`specs/tla/held-floor/`, on the model of `truncation/`: `Held` at `F + 1` replicas,
 the floor that follows the chain, the jump of a laggard; `specs/tla/held-floor-reconfig/`, on the
 model of `truncation-reconfig/`: a reconfiguration onto an empty member after the drop;
-`specs/tla/held-floor-trimmed/`: a lagging replica of a released segment stops as trimmed), and the boundaries of
+`specs/tla/held-floor-trimmed/`: a lagging replica of a released segment stops as trimmed; a
+lagging replica of a held segment copies it from a peer, `CanCopy` of `held-floor/` for safety and
+`specs/tla/peer-pull/` for liveness: the pull turns over the replica peers only), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag

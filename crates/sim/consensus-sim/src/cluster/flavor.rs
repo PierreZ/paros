@@ -56,6 +56,12 @@ pub struct Flavor {
     /// it whole (`Message::SegmentHeld`), and the leader holds it with a
     /// `Hold` that drops its records at the acceptors (R7 of §4.7).
     pub segment_replicas: bool,
+    /// A steer for the heal of a segment: the last replica site is down
+    /// from the start until the settle rounds (a long outage, a legal
+    /// fault). Its
+    /// peers hold the segment meanwhile, and the acceptors drop it at the
+    /// `Hold`, so when it boots only a peer can serve it (R8 of §4.7).
+    pub sleeper: bool,
 }
 
 /// The steer of a walk: the one rare protocol event that the walk moves
@@ -122,6 +128,7 @@ impl Flavor {
             mutant: None,
             controllers: false,
             segment_replicas: false,
+            sleeper: false,
         }
     }
 
@@ -416,17 +423,20 @@ impl Flavor {
     }
 
     /// Segments with replicas (R6 and R7 of §4.7): the walk of
-    /// [`segments`](Flavor::segments), and two replica sites that are the
-    /// replicas of the first segment (`Config::segment_replicas`). Once a
-    /// `Roll` seals it, they report it held, and the acceptors drop its
-    /// records at the `Hold`; a replica that lags while a `Truncate`
+    /// [`segments`](Flavor::segments), and three replica sites that are the
+    /// replicas of the first segment (`Config::segment_replicas`, F = 1).
+    /// Once a `Roll` seals it, they report it held, and the acceptors drop
+    /// its records at the `Hold`; a replica that lags while a `Truncate`
     /// releases the segment finds it released at a trim jump and stops.
+    /// The last site sleeps until the settle rounds (`sleeper`), so that
+    /// only a peer can serve it (R8).
     #[must_use]
     pub fn segment_replicas() -> Self {
         Self {
             name: "segment-replicas",
-            replicas: 2,
+            replicas: 3,
             segment_replicas: true,
+            sleeper: true,
             ..Self::segments()
         }
     }

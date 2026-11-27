@@ -160,6 +160,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   proves every write of the replica's segment below it (`JournalState::releases`), the replica
   stops as trimmed (`ReplicaNode::is_trimmed`; Pierre, 2026-11-27;
   `specs/tla/held-floor-trimmed/`). The `segment-replicas` walk of consensus-sim reaches it.
+  A replica of a segment that its peers hold, and that lagged while the acceptors dropped it,
+  pulls it from a peer of its set: a trim point of a later segment that does not prove the segment
+  released makes it send a `CatchUpRequest` to the next replica peer (never a pooled node of the
+  set), and a peer answers with the chosen records it holds (`ReplicaNode`, R8 of §4.7; Pierre,
+  2026-11-26). This is a rule of paros, not of a paper. Safety is the copy from a peer of
+  `specs/tla/held-floor/` (`CanCopy`); liveness is `Heals` of `specs/tla/peer-pull/`.
 
 ## 10. Pitfalls
 
@@ -175,6 +181,10 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   248 of the `segment-replicas` walk, 2026-11-27). The state sealed at the point can predate the
   `Truncate` that raised it (seed 248: the floor at the slot of the write that `first_seq` names,
   the `Truncate` two slots above), so the proof reads the sender's head `first_seq`.
+- **A replica that sleeps through its segment never seals.** With three replicas and `F = 1`,
+  two reports hold the segment, the acceptors drop it, and the third replica, down the whole
+  time, finds no node that holds it (seed 37 of the `segment-replicas` walk with a sleeper,
+  2026-11-27). Only a peer can serve it.
 
 ## 11. Relatives
 

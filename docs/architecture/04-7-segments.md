@@ -72,8 +72,7 @@ so a deployment without them routes nothing. **Open** (step 8): two kinds of slo
 follower folded and the leader of its time never routed is not routed by the next leader. A slot
 that the leader learned with no choosing ballot (a catch-up replay, the decided tail of a handoff, a
 heal in Phase 1) is not routed either. Today the `Commit` to the
-learners reaches every replica, and with pure voters that `Commit` goes away. Not built yet: the catch-up between
-replicas, the chain in the matchmaking and probe answers, and the walk of consensus-sim with
+learners reaches every replica, and with pure voters that `Commit` goes away. Not built yet: the chain in the matchmaking and probe answers, and the walk of consensus-sim with
 replicas of segments that join from the chain. The acceptors may compact past the `Roll` of a segment before its
 replicas hold it, since the compaction of a `Truncate` does not wait for `Held` (R7: a segment
 that a `Truncate` released counts as held); a replica of that segment that lags below the `Roll`
@@ -91,9 +90,22 @@ after a boot, the replica pulls and serves its store again until the next trim p
 release again. In that window it serves what its store holds, under the fold it reached, as any
 replica that lags behind a `Truncate` does.
 Its model is `specs/tla/held-floor-trimmed/` (`TrimProof`, with the control `trim_segment`: a
-trim point of any later segment as the proof marks a segment that its peers hold). **Open**
-(step 6): a lagging replica of a segment that its peers hold (`Held` by reports, not released)
-still refuses every trim point; the catch-up between replicas heals it. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
+trim point of any later segment as the proof marks a segment that its peers hold). **A lagging
+replica of a segment that its peers hold pulls it from a peer** (the first half of R8, decided by
+Pierre on 2026-11-26; found by the `segment-replicas` walk with three replicas, one of them down
+until the settle rounds: seed 37 stayed at slot 0 while its peers held slots 0 to 9 and every node
+had dropped them). A trim point of a later segment that does not prove the segment released means
+that the acceptors dropped the segment at its `Hold`, so the replica sends a `CatchUpRequest` to
+the next replica peer of its segment's set (the set that its base names, else
+`Config::segment_replicas`), one peer for each pull, in turn. A pooled node that the set names is
+never asked: it dropped the segment too and answers with a trim point, so a pull that rotates
+over it stalls while it leads (the control `guard_leader_peer` of `specs/tla/peer-pull/`). A peer answers with the records it holds, contiguous from the asked
+slot, at most a page, and only to a member of its set. Every record that a replica holds is
+chosen, so any peer is a safe source. Safety is `CanCopy` of `specs/tla/held-floor/`, where a
+replica copies a chosen slot of its segment from a node or a peer, and `held_ever` of
+`held-floor-retry/` checks the floor with it. Liveness is `Heals` of `specs/tla/peer-pull/`: the
+pull reaches a peer that holds the segment under crashes and recoveries, with the controls
+`guard_leader_peer` (a pull over the pooled nodes too) and `first_only` (a pull that never turns). **Open** (step 6): a slot past the end that a replica learned before its seal (above a
 hole below the `Roll`) stays in its durable store; the seal drops it from memory and the boot
 skips it, and no `WriteOp` deletes a record above the floor. The states past `Sealed` decide
 what a sealed replica's store keeps.
@@ -281,7 +293,12 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   **Open** (step 6):
   a sealed replica that compacted inside its segment, or jumped into it, reports nothing. It
   holds every slot that a decided `Truncate` did not release, but the rule that counts it needs
-  a model with replicas that compact (`held-floor/` has none).
+  a model with replicas that compact (`held-floor/` has none). The peer pull of R8 rests on
+  this rule as it is: a peer serves records contiguous from the asked slot, so a lagging
+  replica heals only while some holder keeps the segment from its start. The rule that counts
+  a compacted replica must also let a holder answer a pull below its floor (with a trim point
+  inside the segment that a replica takes from a peer), and `peer-pull/` must get a holder
+  with a floor.
   **Departure 2** (§4.7.4).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment

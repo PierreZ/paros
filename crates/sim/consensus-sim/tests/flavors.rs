@@ -111,6 +111,7 @@ fn segment_replicas() {
             reach::CHAIN_PUBLISHED,
             reach::HELD_DROP,
             reach::REPLICA_TRIMMED,
+            reach::PEER_ONLY,
         ],
     );
 }

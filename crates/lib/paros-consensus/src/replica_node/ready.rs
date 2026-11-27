@@ -47,21 +47,38 @@ impl ReplicaReady<'_> {
     pub fn messages(&self) -> &[(Audience, Message)] {
         let me = self.node.config.id;
         let messages = &self.node.pending_messages;
-        // A replica speaks only in its own name, and each message asks one
-        // pooled node: it never fans out and never addresses itself.
+        // A replica speaks only in its own name, and each message goes to
+        // one party: a pooled node, or one peer of its segment (R8). It
+        // never fans out and never addresses itself.
         for (audience, message) in messages {
             assert!(
                 match message {
-                    Message::CatchUpRequest { from, .. } | Message::SegmentHeld { from, .. } =>
-                        *from == me,
+                    Message::CatchUpRequest { from, .. }
+                    | Message::SegmentHeld { from, .. }
+                    | Message::CatchUpResponse { from, .. } => *from == me,
                     Message::PreRead { reply_to, .. } => *reply_to == me,
                     _ => false,
                 },
-                "a replica sends only its own catch-up requests, pre-reads and held reports"
+                "a replica sends only its own catch-up requests, pages, pre-reads and held reports"
             );
             assert!(
-                matches!(audience, Audience::Node(to) if *to != me && self.node.in_pool(*to)),
-                "a replica's message asks one pooled node"
+                match audience {
+                    Audience::Node(to) => *to != me && self.node.in_pool(*to),
+                    Audience::ReplicasOf { replicas, .. } => {
+                        replicas.members().len() == 1
+                            && replicas
+                                .members()
+                                .iter()
+                                .all(|to| *to != me && self.node.is_segment_peer(*to))
+                    }
+                    _ => false,
+                },
+                "a replica's message goes to one pooled node or one peer of its segment"
+            );
+            assert!(
+                !matches!(message, Message::CatchUpResponse { .. })
+                    || matches!(audience, Audience::ReplicasOf { .. }),
+                "a replica pages only a peer of its segment"
             );
         }
         messages

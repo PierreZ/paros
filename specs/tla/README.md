@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2945,3 +2945,29 @@ The check with a command at slot 0 and the `Roll` at slot 1 is long.
 
 What is not in the model: a third configuration, the restart and the faulty record of
 `truncation/`, and the chain at a matchmaker quorum.
+
+### `peer-pull/`: the pull of a lagging replica from a peer of its segment, for step 6 of the segments in the core
+
+The first half of R8 of `docs/architecture/04-7-segments.md`: the acceptors dropped segment k
+at its `Hold`, so its peers hold it (R7), and a replica of k that lagged must copy it from a peer.
+The safety of the copy is `CanCopy` of `held-floor/` (a peer holds only chosen slots of its
+segment). `PeerPull.tla` checks liveness: the lagging replica holds its segment in the end
+(`Heals`), while the leader beats, every message is stepped, and the replicas of the set crash and
+recover. Each beat draws a trim point of a later segment that does not prove k released, and each
+trim point may draw a pull. A set may name pooled nodes beside replicas; a node of the set dropped
+k too and answers a pull with a trim point. The rule (`PullRule = "replicas"`) is the one of
+`ReplicaNode::request_peer_catch_up`: each trim point pulls from the next replica peer of the set,
+in turn, and never from a pooled node. No trace spec follows the pull: the `segment-replicas`
+walk of consensus-sim reaches it (`PEER_ONLY`) and its oracles judge the sealed replica.
+
+| Check | CI | Result |
+|---|---|---|
+| `leader_peer` | ci | pass of `Heals`: the leader is the node of the set, beside one replica that holds k and may crash once |
+| `guard_leader_peer` | ci | violation of `Heals`: the control `PullRule = "guard"` (pull on a trim point from a party outside the set, over every peer of the set, nodes too): every trim point comes from the leader, which is in the set, so no pull leaves |
+| `two_replicas` | ci | pass of `Heals`: two replica peers, of which only the second holds k, and two crashes |
+| `guard_two_replicas` | ci | pass of `Heals`: the same with the control rule; it heals when no node is in the set |
+| `first_only` | ci | violation of `Heals`: the control `PullRule = "first"` pulls from the first replica peer only, which does not hold k |
+| `no_beat` | ci | violation of `Heals`: `leader_peer` with no beat (`Beats = FALSE`); a pull leaves only on a trim point |
+
+What is not in the model: the pages of a long segment (one page holds k here), a peer that
+holds only a prefix of k, and a set that a `SetReplicas` changes (the heal models of step 7).
