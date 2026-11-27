@@ -2981,7 +2981,7 @@ check has `F = 1`, three losses and `N = 2`.
 | `back_nostamp` | ci | violation of `Kept`: the control `Stamp = "none"`; `c` reports at version 0, is released and drops its copy, the heal adds it back, its old report counts, and `a` is released |
 
 What is not in the model: the routing of a `SetReplicas` and what a new replica serves before it
-is whole (`segment-reseat/`, D10), a second heal, who proposes the heal, and how the tally learns
+is whole (the checks that D10 of §4.7 names), a second heal, who proposes the heal, and how the tally learns
 a heal from the chain (the liveness Open of R8). The tally of the code (`collector/held.rs`)
 deletes the reports of a segment at `Held` and refuses later reports of it, so it must change
 before a set can change.
