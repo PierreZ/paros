@@ -94,14 +94,18 @@ trim point of any later segment as the proof marks a segment that its peers hold
 replica of a segment that its peers hold pulls it from a peer** (the first half of R8, decided by
 Pierre on 2026-11-26; found by the `segment-replicas` walk with three replicas, one of them down
 until the settle rounds: seed 37 stayed at slot 0 while its peers held slots 0 to 9 and every node
-had dropped them). A trim point of a later segment that proves nothing released means that the
-acceptors dropped the segment at its `Hold`, so the replica sends a `CatchUpRequest` to the next
-peer of its segment's set (the set that its base names, else `Config::segment_replicas`), one
-peer for each pull, in turn. A peer answers with the records it holds, contiguous from the asked
+had dropped them). A trim point of a later segment that does not prove the segment released means
+that the acceptors dropped the segment at its `Hold`, so the replica sends a `CatchUpRequest` to
+the next replica peer of its segment's set (the set that its base names, else
+`Config::segment_replicas`), one peer for each pull, in turn. A pooled node that the set names is
+never asked: it dropped the segment too and answers with a trim point, so a pull that rotates
+over it stalls while it leads (the control `guard_leader_peer` of `specs/tla/peer-pull/`). A peer answers with the records it holds, contiguous from the asked
 slot, at most a page, and only to a member of its set. Every record that a replica holds is
-chosen, so any peer is a safe source; the model is `CanCopy` of `specs/tla/held-floor/`, where a
+chosen, so any peer is a safe source. Safety is `CanCopy` of `specs/tla/held-floor/`, where a
 replica copies a chosen slot of its segment from a node or a peer, and `held_ever` of
-`held-floor-retry/` checks the floor with it. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
+`held-floor-retry/` checks the floor with it. Liveness is `Heals` of `specs/tla/peer-pull/`: the
+pull reaches a peer that holds the segment under crashes and recoveries, with the controls
+`guard_leader_peer` (a pull over the pooled nodes too) and `first_only` (a pull that never turns). **Open** (step 6): a slot past the end that a replica learned before its seal (above a
 hole below the `Roll`) stays in its durable store; the seal drops it from memory and the boot
 skips it, and no `WriteOp` deletes a record above the floor. The states past `Sealed` decide
 what a sealed replica's store keeps.

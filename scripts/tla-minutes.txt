@@ -39,6 +39,7 @@ matchmaker 6.5
 multi-paxos 20
 multi-paxos-roll 9.5
 node 12.5
+peer-pull 0.5
 proxy-leader 2
 read-replica 1
 reads 22

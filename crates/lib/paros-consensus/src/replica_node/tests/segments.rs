@@ -693,7 +693,7 @@ fn sent(replica: &mut ReplicaNode, disk: &mut MemStorage) -> Vec<(Audience, Mess
 }
 
 /// A lagging replica of a segment that its peer holds gets a trim point of
-/// the next segment that proves nothing released: the acceptors dropped the
+/// the next segment that does not prove the segment released: the acceptors dropped the
 /// segment at its `Hold`. It pulls the segment from its peer, which serves
 /// its records, and it seals (R8 of §4.7). A party outside the set gets
 /// nothing, and a sealed replica pulls nothing more.
@@ -799,4 +799,92 @@ fn a_replica_alone_in_its_set_pulls_from_no_peer() {
     });
     assert_eq!(sent(&mut replica, &mut disk), Vec::new());
     assert_eq!(replica.counters().peer_pulls, 0);
+}
+
+/// A pooled node that the set names (here the leader, node 0) dropped the
+/// segment at its `Hold` like every acceptor, and it answers with a trim
+/// point. The pull skips it and turns over the replica peers, one for each
+/// trim point, so the trim points of the leader never stall the pull
+/// (`PullRule = "replicas"` of `specs/tla/peer-pull/`).
+#[test]
+fn a_lagging_replica_pulls_from_no_pooled_node_of_its_set() {
+    let mut disk = MemStorage::new(Config {
+        segment_replicas: Some(crate::journal::segment::ReplicaSet::new([
+            NodeId(0),
+            NodeId(10),
+            NodeId(11),
+            NodeId(12),
+        ])),
+        ..Config {
+            id: NodeId(10),
+            ..multi()
+        }
+    });
+    let mut laggard = ReplicaNode::new(&disk, Limits::DEFAULT);
+    for (turn, peer) in [11, 12, 11].into_iter().enumerate() {
+        laggard.step(Message::TrimmedTo {
+            from: NodeId(0),
+            point: Slot(3),
+            state: boundary(),
+            first_seq: Seq(0),
+        });
+        let pulls = sent(&mut laggard, &mut disk);
+        assert_eq!(
+            pulls.iter().map(|(to, _)| to.clone()).collect::<Vec<_>>(),
+            vec![Audience::ReplicasOf {
+                segment: SegmentId::FIRST,
+                replicas: crate::journal::segment::ReplicaSet::new([NodeId(peer)]),
+            }]
+        );
+        assert_eq!(laggard.counters().peer_pulls, turn as u64 + 1);
+    }
+}
+
+/// The slots of a peer's page, asked from `from_slot` by replica 10.
+fn page_from(peer: &mut ReplicaNode, disk: &mut MemStorage, from_slot: u64) -> Vec<Slot> {
+    peer.step(Message::CatchUpRequest {
+        from: NodeId(10),
+        from_slot: Slot(from_slot),
+    });
+    sent(peer, disk)
+        .into_iter()
+        .flat_map(|(_, page)| match page {
+            Message::CatchUpResponse { entries, .. } => entries.into_keys().collect::<Vec<_>>(),
+            other => panic!("a peer answers with a page, got {other:?}"),
+        })
+        .collect()
+}
+
+/// A peer pages its records contiguous from the asked slot: a hole ends
+/// the page, a slot it does not hold gives no answer, and a trimmed peer
+/// serves nothing.
+#[test]
+fn a_peer_serves_a_contiguous_page_from_the_asked_slot() {
+    let mut disk = MemStorage::new(peer_config(11));
+    let mut peer = ReplicaNode::new(&disk, Limits::DEFAULT);
+    peer.step(commit(0, write(7)));
+    peer.step(commit(1, write(8)));
+    peer.step(commit(3, write(9)));
+    let _ = drain(&mut peer, &mut disk);
+    assert_eq!(page_from(&mut peer, &mut disk, 0), vec![Slot(0), Slot(1)]);
+    assert_eq!(page_from(&mut peer, &mut disk, 1), vec![Slot(1)]);
+    assert_eq!(page_from(&mut peer, &mut disk, 2), Vec::<Slot>::new());
+    assert_eq!(page_from(&mut peer, &mut disk, 3), vec![Slot(3)]);
+    assert_eq!(peer.counters().peer_pages, 3);
+
+    // A trim point that proves the segment released marks the peer
+    // trimmed: it serves nothing more.
+    peer.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(5),
+        state: JournalState {
+            first_seq: Seq(1),
+            ..boundary()
+        },
+        first_seq: Seq(0),
+    });
+    assert!(peer.is_trimmed());
+    let _ = sent(&mut peer, &mut disk);
+    assert_eq!(page_from(&mut peer, &mut disk, 3), Vec::<Slot>::new());
+    assert_eq!(peer.counters().peer_pages, 3);
 }

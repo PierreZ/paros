@@ -161,10 +161,11 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   stops as trimmed (`ReplicaNode::is_trimmed`; Pierre, 2026-11-27;
   `specs/tla/held-floor-trimmed/`). The `segment-replicas` walk of consensus-sim reaches it.
   A replica of a segment that its peers hold, and that lagged while the acceptors dropped it,
-  pulls it from a peer of its set: a trim point of a later segment that proves nothing released
-  makes it send a `CatchUpRequest` to the next peer, and a peer answers with the chosen records
-  it holds (`ReplicaNode`, R8 of §4.7; Pierre, 2026-11-26). This is a rule of paros, not of a
-  paper; the model is the copy from a peer of `specs/tla/held-floor/` (`CanCopy`).
+  pulls it from a peer of its set: a trim point of a later segment that does not prove the segment
+  released makes it send a `CatchUpRequest` to the next replica peer (never a pooled node of the
+  set), and a peer answers with the chosen records it holds (`ReplicaNode`, R8 of §4.7; Pierre,
+  2026-11-26). This is a rule of paros, not of a paper. Safety is the copy from a peer of
+  `specs/tla/held-floor/` (`CanCopy`); liveness is `Heals` of `specs/tla/peer-pull/`.
 
 ## 10. Pitfalls
 

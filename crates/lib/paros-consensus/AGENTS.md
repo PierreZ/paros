@@ -96,7 +96,8 @@ Deployments (each wires roles and owns one `Ready`):
   while a `Truncate` released its segment (`ReplicaNode::is_trimmed`, from the state and the head
   `first_seq` of a `TrimmedTo`, `JournalState::releases`), and the replica that pulls its
   segment from a peer of its set once the acceptors dropped it (R8: `CatchUpRequest` and
-  `CatchUpResponse` between replicas, `Audience::ReplicasOf` one peer).
+  `CatchUpResponse` between replicas, `Audience::ReplicasOf` one replica peer, never a pooled
+  node of the set; liveness model `specs/tla/peer-pull/`).
 
 Test-only:
 

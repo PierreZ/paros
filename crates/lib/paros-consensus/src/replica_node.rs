@@ -31,13 +31,15 @@
 //!   `SegmentHeld`, to the beat's sender, once sealed with its whole
 //!   segment on a matchmaker deployment (R7 of §4.7). A lagging replica is
 //!   healed by the acceptors, as a lagging acceptor is, until they drop its
-//!   segment at the `Hold`. Then a trim point of a later segment that
-//!   proves nothing released makes it pull from the next peer of its
-//!   segment's set (`CatchUpRequest` to [`Audience::ReplicasOf`] that one
-//!   peer), and a peer answers with the records it holds, contiguous from
-//!   the asked slot (`CatchUpResponse`, R8). Every record a replica holds is
-//!   chosen, so a peer is a safe source (`CanCopy` of
-//!   `specs/tla/held-floor/HeldFloor.tla`).
+//!   segment at the `Hold`. Then a trim point of a later segment that does
+//!   not prove the segment released makes it pull from the next replica
+//!   peer of its segment's set, never a pooled node of the set
+//!   (`CatchUpRequest` to [`Audience::ReplicasOf`] that one peer), and a
+//!   peer answers with the records it holds, contiguous from the asked slot
+//!   (`CatchUpResponse`, R8). Every record a replica holds is chosen, so a
+//!   peer is a safe source (safety: `CanCopy` of
+//!   `specs/tla/held-floor/HeldFloor.tla`); the pull heals the replica
+//!   (liveness: `Heals` of `specs/tla/peer-pull/`).
 //! - **Reads:** the journal read ([`ReplicaNode::read_log`], #185) is served
 //!   from this replica's own chosen prefix, so read load leaves the
 //!   acceptors; the leaderless read (§3.4, the paper's own reader,
@@ -893,6 +895,17 @@ impl ReplicaNode {
             return Err(JoinRefusal::Boundary);
         }
         let joined = boundary.segment.id;
+        // A pull or a page of the segment before the join addresses a peer
+        // of that segment, which may be no peer of the joined one: drop it,
+        // as the network may.
+        self.pending_messages
+            .retain(|(to, _)| !matches!(to, Audience::ReplicasOf { .. }));
+        assert!(
+            self.pending_messages
+                .iter()
+                .all(|(to, _)| !matches!(to, Audience::ReplicasOf { .. })),
+            "a join keeps no message of the segment it leaves"
+        );
         self.replica.unbind_segment();
         self.trim_to(start, boundary);
         self.replica.bind_segment();
@@ -955,18 +968,15 @@ impl ReplicaNode {
                     self.replica.segment_bound() == Some(bound),
                     "a trimmed replica keeps the segment it found released"
                 );
-            } else if self
-                .replica
-                .segment_bound()
-                .is_some_and(|bound| state.segment.id > bound)
-                && !self.replica.is_sealed()
-                && !self.trimmed
-                && !self.is_segment_peer(from)
-            {
-                // The acceptors dropped the segment at its `Hold`: its peers
-                // hold it (R7), and the copy comes from one of them (R8). A
-                // trim point from a peer (a node that a `Roll` named) is the
-                // answer to a pull, and asks no more: the next beat pulls.
+            } else if self.replica.segment_bound().is_some() && !self.replica.is_sealed() {
+                // The trim point names a later segment: the floor of a
+                // replica lies at or above the start of its segment, so a
+                // trim point of an earlier one was ignored above. The
+                // acceptors dropped the segment at its `Hold`: its peers
+                // hold it (R7), and the copy comes from one of them (R8).
+                // The pull goes to a replica peer only, which never answers
+                // with a trim point, so a pull asks no second pull
+                // (`PullRule = "replicas"` of `specs/tla/peer-pull/`).
                 self.request_peer_catch_up();
             }
             return;
@@ -1099,14 +1109,20 @@ impl ReplicaNode {
         peer
     }
 
-    /// Pull the slots this replica misses from the next peer of its
-    /// segment (R8 of `docs/architecture/04-7-segments.md`): the acceptors
-    /// dropped them at the segment's `Hold`, and its peers hold them. A
-    /// peer serves only chosen records, so any peer is a safe source; the
-    /// turn moves on at each pull, so every peer is asked in time
-    /// (`CanCopy` of `specs/tla/held-floor/HeldFloor.tla`).
+    /// Pull the slots this replica misses from the next replica peer of
+    /// its segment (R8 of `docs/architecture/04-7-segments.md`): the
+    /// acceptors dropped them at the segment's `Hold`, and its peers hold
+    /// them. A peer serves only chosen records, so any peer is a safe
+    /// source (`CanCopy` of `specs/tla/held-floor/HeldFloor.tla`). A pooled
+    /// node of the set is never asked: it dropped the segment too, and it
+    /// answers with a trim point. The turn moves on at each pull, so every
+    /// replica peer is asked in time (`Heals` of `specs/tla/peer-pull/`).
     fn request_peer_catch_up(&mut self) {
-        let peers = self.segment_peers();
+        let peers: Vec<NodeId> = self
+            .segment_peers()
+            .into_iter()
+            .filter(|p| !self.in_pool(*p))
+            .collect();
         let Some(bound) = self.replica.segment_bound() else {
             return;
         };
@@ -1145,9 +1161,11 @@ impl ReplicaNode {
         let Some(bound) = self.replica.segment_bound() else {
             return;
         };
-        if self.trimmed || from_slot < self.floor {
+        if self.trimmed {
             return;
         }
+        // A page is contiguous from the asked slot, so a slot below the
+        // floor (no record) gives an empty page and no answer.
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut expected = from_slot;
         for (slot, record) in self.records.range(from_slot..) {
