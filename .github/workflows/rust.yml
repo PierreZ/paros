@@ -86,11 +86,13 @@ jobs:
       # 20 minutes of trace checks. The core writes no struct update: a list that matches nothing
       # must be empty. `--list` builds nothing.
       - name: Check that every mutant of paros-consensus obeys --re
+        # The list goes to a file inside the shell: the dev shell prints a banner on stdout, and a
+        # cargo-mutants that fails fails the step.
         run: |
-          listed=$(nix develop --command cargo mutants --list -p paros-consensus --re '^$' 2>/dev/null)
-          if [ -n "$listed" ]; then
+          nix develop --command bash -c 'cargo mutants --list -p paros-consensus --re "^$" > "$RUNNER_TEMP/ignore-re.txt"'
+          if [ -s "$RUNNER_TEMP/ignore-re.txt" ]; then
             echo "These mutants ignore --re (a struct update); write the fields one by one:"
-            echo "$listed"
+            cat "$RUNNER_TEMP/ignore-re.txt"
             exit 1
           fi
       # docs/architecture/04-roles.md §4.4: no runtime, I/O or storage dependency in the pure crates.
