@@ -1132,12 +1132,19 @@ impl Replica {
         Some(end)
     }
 
-    /// Whether the write `entry`, folded at `slot`, was answered `Held`:
-    /// its position lies inside the held prefix of the state it was judged
-    /// against. Such a retry reads no record, so it holds no floor down.
+    /// Whether the write `entry`, folded at `slot`, was answered `Held`, as
+    /// the fold recorded it ([`Replica::outcome_at`]). Such a retry reads no
+    /// record, so it holds no floor down.
     fn folded_held(&self, slot: Slot, entry: &Entry) -> bool {
+        let held = matches!(self.outcome_at(slot), Some(Outcome::Held(_)));
+        // Paired with the rule of `JournalState::apply`, which wrote the
+        // outcome: a `Held` retry lies below the position of the held
+        // prefix in the state it was judged against.
         let at = self.state_at(slot);
-        let held = at.held.is_some_and(|hold| entry.seq < hold.next_seq);
+        assert!(
+            !held || at.held.is_some_and(|hold| entry.seq < hold.next_seq),
+            "a retry answered held lies inside the held prefix"
+        );
         assert!(
             !held || self.mode == WriterMode::Single,
             "only a single-writer retry is answered held"
