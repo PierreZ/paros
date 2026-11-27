@@ -1070,6 +1070,7 @@ fn a_trim_point_at_or_below_the_floor_is_a_no_op() {
         from: NodeId(0),
         point: Slot(0),
         state: JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     let ready = replica.ready();
     assert!(
@@ -1318,6 +1319,7 @@ fn a_replica_takes_a_trim_point_only_as_an_answer() {
         from: NodeId(from),
         point: Slot(4),
         state: JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     };
     let mut replica = plain_replica(Limits::DEFAULT);
     replica.step(trimmed(0));
@@ -1343,6 +1345,7 @@ fn a_replica_takes_a_trim_point_only_as_an_answer() {
         from: NodeId(0),
         point: Slot(0),
         state: JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(
         replica.counters().ignored,
@@ -1365,6 +1368,7 @@ fn a_replica_request_answered_by_entries_closes_the_trim_point_gate() {
         from: NodeId(0),
         point: Slot(4),
         state: JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     let _ = sent(&mut replica);
     let entries: BTreeMap<Slot, (Ballot, Command)> =
@@ -1379,6 +1383,7 @@ fn a_replica_request_answered_by_entries_closes_the_trim_point_gate() {
         from: NodeId(0),
         point: Slot(8),
         state: JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(
         replica.first_slot(),

@@ -256,6 +256,7 @@ fn a_trim_point_of_another_segment_is_not_taken() {
         from: NodeId(0),
         point: Slot(3),
         state: boundary(),
+        first_seq: Seq(0),
     });
     assert_eq!(replica.first_slot(), Slot(0), "the trim point is not taken");
     assert_eq!(replica.counters().past_end, 1);
@@ -266,6 +267,7 @@ fn a_trim_point_of_another_segment_is_not_taken() {
         from: NodeId(0),
         point: Slot(3),
         state: JournalState::default(),
+        first_seq: Seq(0),
     });
     assert_eq!(replica.first_slot(), Slot(0));
     assert_eq!(replica.counters().past_end, 2);
@@ -593,4 +595,71 @@ fn a_replica_with_a_rotted_chosen_slot_does_not_join() {
         rebooted.join_segment(Slot(2), boundary()),
         Err(JoinRefusal::NotFresh)
     );
+}
+
+/// A lagging replica of the first segment gets a trim point of the next
+/// one. With a state that proves every write of its segment released, it
+/// marks the segment trimmed: it pulls nothing more, serves no read and
+/// ignores later trim points. A state that proves nothing leaves it open.
+#[test]
+fn a_lagging_replica_of_a_released_segment_stops() {
+    let pull_beat = Message::Heartbeat {
+        from: NodeId(0),
+        ballot: Ballot {
+            round: 1,
+            node: NodeId(0),
+        },
+        commit: Some(Slot(9)),
+        config: None,
+        fence: None,
+        gc_floor: None,
+    };
+    // The state at the point, the head `first_seq` the sender adds, and
+    // whether they prove the segment released.
+    for (first_seq, head, releases) in [(0, 0, false), (1, 0, true), (0, 1, true)] {
+        let mut disk = MemStorage::new(multi());
+        let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+        // Slot 1 is learned, slot 0 is not: the replica lags.
+        replica.step(commit(1, write(7)));
+        let _ = drain(&mut replica, &mut disk);
+        let state = JournalState {
+            first_seq: Seq(first_seq),
+            ..boundary()
+        };
+        assert_eq!(state.releases(SegmentId::FIRST, Seq(head)), releases);
+        replica.step(Message::TrimmedTo {
+            from: NodeId(0),
+            point: Slot(3),
+            state,
+            first_seq: Seq(head),
+        });
+        assert_eq!(replica.first_slot(), Slot(0), "the trim point is not taken");
+        assert_eq!(replica.is_trimmed(), releases);
+        let _ = drain(&mut replica, &mut disk);
+        let asked = replica.counters().catch_up_requests;
+        replica.step(pull_beat.clone());
+        assert_eq!(
+            replica.counters().catch_up_requests,
+            asked + u64::from(!releases),
+            "only an open replica pulls"
+        );
+        assert_eq!(
+            matches!(replica.read_log(Seq(0), 8, 1 << 20), LogRead::NotHeld),
+            releases,
+            "a trimmed replica serves no read"
+        );
+        let ignored = replica.counters().ignored;
+        replica.step(Message::TrimmedTo {
+            from: NodeId(0),
+            point: Slot(4),
+            state: boundary(),
+            first_seq: Seq(0),
+        });
+        assert_eq!(
+            replica.counters().ignored,
+            ignored + u64::from(releases),
+            "a trimmed replica ignores every trim point"
+        );
+        assert!(!replica.replica().is_sealed());
+    }
 }

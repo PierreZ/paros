@@ -154,7 +154,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   rises to the end of the held prefix when the fold applies the `Hold`
   (`Replica::compaction_target`), and a `ReplicaNode` keeps them (`Keep`). A segment whose
   writes all lie below `first_seq` counts as held with no report (Pierre, 2026-11-26;
-  `specs/tla/held-floor-released/`, `ColocatedNode::judge_released`).
+  `specs/tla/held-floor-released/`, `ColocatedNode::judge_released`). A replica of such a
+  segment that lagged gets only trim points of a later segment: a `TrimmedTo` carries the
+  sender's head `first_seq` (`Message::TrimmedTo::first_seq`), and when the state at the point
+  proves every write of the replica's segment below it (`JournalState::releases`), the replica
+  stops as trimmed (`ReplicaNode::is_trimmed`; Pierre, 2026-11-27;
+  `specs/tla/held-floor-trimmed/`). The `segment-replicas` walk of consensus-sim reaches it.
 
 ## 10. Pitfalls
 
@@ -165,6 +170,11 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   of the plan.
 - **Acting on a vote.** A replica that applies a voted `Roll` can see a second end
   (`act_vote`).
+- **A lagging replica of a released segment never seals.** The acceptors drop the segment at
+  its `Hold` with no report, so the replica gets only trim points of a later segment (seeds 7 and
+  248 of the `segment-replicas` walk, 2026-11-27). The state sealed at the point can predate the
+  `Truncate` that raised it (seed 248: the floor at the slot of the write that `first_seq` names,
+  the `Truncate` two slots above), so the proof reads the sender's head `first_seq`.
 
 ## 11. Relatives
 

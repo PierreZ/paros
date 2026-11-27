@@ -54,6 +54,7 @@ impl ColocatedNode {
                     from: me,
                     point,
                     state: self.replica.journal_base(),
+                    first_seq: self.replica.journal().first_seq,
                 },
             );
             return;

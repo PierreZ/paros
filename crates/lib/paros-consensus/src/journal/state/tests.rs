@@ -666,3 +666,53 @@ fn an_ignored_roll_that_names_another_tail_is_a_bug() {
         &Outcome::RollIgnored(other),
     );
 }
+
+/// A state sealed past a segment proves the segment released when every
+/// write before it is released, or when its held prefix reaches the
+/// segment with every write up to the held end released; never from the
+/// segment itself or an earlier one.
+#[test]
+fn a_state_releases_a_segment_only_with_its_writes_below_first_seq() {
+    let at = |segment: u64, next_seq: u64, first_seq: u64, held: Option<Hold>| JournalState {
+        next_seq: Seq(next_seq),
+        first_seq: Seq(first_seq),
+        segment: Segment {
+            id: SegmentId(segment),
+            start: Slot(segment * 4),
+        },
+        held,
+        ..JournalState::default()
+    };
+    // With the state's own `first_seq`.
+    let own =
+        |state: &JournalState, segment: u64| state.releases(SegmentId(segment), state.first_seq);
+    let hold = |segment: u64, next_seq: u64| Hold {
+        segment: SegmentId(segment),
+        end: Slot((segment + 1) * 4),
+        next_seq: Seq(next_seq),
+    };
+    // Every write before the state is released.
+    assert!(own(&at(2, 5, 5, None), 0));
+    assert!(own(&at(2, 5, 5, None), 1));
+    assert!(!own(&at(2, 5, 4, None), 1));
+    // The state is in the segment, or before it.
+    assert!(!own(&at(1, 5, 5, None), 1));
+    assert!(!own(&at(1, 5, 5, None), 2));
+    // The held prefix reaches the segment, and its writes are released.
+    assert!(own(&at(2, 9, 5, Some(hold(1, 5))), 1));
+    assert!(own(&at(2, 9, 5, Some(hold(1, 5))), 0));
+    assert!(!own(&at(2, 9, 4, Some(hold(1, 5))), 1));
+    // A held prefix that stops before the segment proves nothing of it.
+    assert!(!own(&at(3, 9, 5, Some(hold(0, 5))), 1));
+    assert!(own(&at(3, 9, 5, Some(hold(0, 5))), 0));
+    for state in [at(2, 5, 5, None), at(2, 9, 5, Some(hold(1, 5)))] {
+        assert!(state.is_well_formed());
+    }
+    // A later `first_seq` releases what the state's own does not; a lower
+    // one counts as the state's.
+    assert!(!at(2, 5, 3, None).releases(SegmentId(1), Seq(4)));
+    assert!(at(2, 5, 3, None).releases(SegmentId(1), Seq(5)));
+    assert!(at(2, 5, 5, None).releases(SegmentId(1), Seq(0)));
+    assert!(at(3, 9, 0, Some(hold(1, 5))).releases(SegmentId(1), Seq(5)));
+    assert!(!at(3, 9, 0, Some(hold(1, 5))).releases(SegmentId(2), Seq(5)));
+}

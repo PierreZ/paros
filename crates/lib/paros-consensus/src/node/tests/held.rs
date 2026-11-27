@@ -258,3 +258,80 @@ fn a_plain_node_ignores_a_report() {
     nodes[0].step(held(1, 0, Slot(1)));
     assert_eq!(nodes[0].held_segments().count(), 0);
 }
+
+/// A node cut off while its peers hold the first segment and drop its
+/// records asks, once it hears the leader again, from below their floor.
+/// It jumps to the floor (the held end) with the state sealed there, then
+/// folds the `Hold` from the catch-up above it: it ends with the same
+/// journal state, the same held floor and the same acceptor floor as its
+/// peers.
+#[test]
+fn a_laggard_jumps_past_a_held_segment_and_folds_its_hold() {
+    let first = ReplicaSet::new([NodeId(8), NodeId(9)]);
+    let (mut nodes, mut mms) = super::route::cluster_with_first(Some(&first), 3);
+    let q = super::route::matchmade(&mut nodes, 0, &mut mms);
+    // Node 2 hears nothing from here on, until it reconnects below.
+    let mut routed = Vec::new();
+    routed.extend(super::route::deliver_routed(&mut nodes[..2], q));
+    assert!(nodes[0].is_leader());
+    own_and_write(&mut nodes[..2], &mut routed);
+    let RollResult::Accepted { slot, .. } = nodes[0].roll(None) else {
+        panic!("the leader admits a roll");
+    };
+    for _ in 0..3 {
+        for i in 0..2 {
+            let q = super::route::drain_routed(&mut nodes[i], &mut routed);
+            routed.extend(super::route::deliver_routed(&mut nodes[..2], q));
+        }
+    }
+    nodes[0].resend_segment_publishes();
+    let requests = drain_publishes(&mut nodes[0]);
+    for ack in publish(&mut mms, &requests) {
+        let _ = nodes[0].on_segment_ack(&ack);
+    }
+    let end = Slot(slot.0 + 1);
+    nodes[0].step(held(8, 0, end));
+    nodes[0].step(held(9, 0, end));
+    for _ in 0..3 {
+        for i in 0..2 {
+            let q = super::route::drain_routed(&mut nodes[i], &mut routed);
+            routed.extend(super::route::deliver_routed(&mut nodes[..2], q));
+        }
+    }
+    for node in &nodes[..2] {
+        assert!(node.replica().journal().held.is_some());
+        assert_eq!(node.acceptor().first_slot(), end, "the peers dropped");
+    }
+    assert_eq!(nodes[2].hard_state().chosen_index, None, "the laggard");
+    // The laggard reconnects: the leader's beats make it ask, and the
+    // answer below the floor is a jump.
+    let mut jumped = false;
+    for _ in 0..(4 * crate::node::HEARTBEAT_TICKS) {
+        for i in 0..nodes.len() {
+            nodes[i].tick();
+            let mut queue = super::route::drain_routed(&mut nodes[i], &mut routed);
+            while let Some((to, message)) = queue.pop() {
+                jumped |= to == NodeId(2)
+                    && matches!(message, Message::TrimmedTo { point, .. } if point == end);
+                let Some(n) = nodes.iter_mut().find(|n| n.config().id == to) else {
+                    continue;
+                };
+                n.step(message);
+                queue.extend(super::route::drain_routed(n, &mut routed));
+            }
+        }
+    }
+    assert!(jumped, "the laggard asked below the floor and got a jump");
+    let leader = nodes[0].replica().journal();
+    assert_eq!(nodes[2].replica().journal(), leader);
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        nodes[0].hard_state().chosen_index
+    );
+    assert_eq!(nodes[2].acceptor().first_slot(), end, "the floor jumped");
+    // The laggard heard no report: its tally holds nothing, and as a
+    // leader it would propose from past the `Hold` its fold applied.
+    assert_eq!(nodes[2].held_segments().count(), 0);
+    assert_eq!(nodes[2].known_held(), leader.held.map(|h| h.segment));
+    assert_eq!(nodes[2].known_held(), Some(SegmentId::FIRST));
+}

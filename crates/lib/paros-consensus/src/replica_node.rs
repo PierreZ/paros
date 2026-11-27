@@ -237,6 +237,12 @@ pub struct ReplicaNode {
     /// its last trim-point jump: a `TrimmedTo` is taken only when it answers
     /// a request below its point, as on a node. Volatile.
     catchup_asked: Option<Slot>,
+    /// The segment this replica keeps is released: a trim jump carried a
+    /// state that proves every write of it below `first_seq`
+    /// ([`JournalState::releases`]) while this replica did not hold all of
+    /// it. It has nothing left to copy: it pulls nothing and serves no read.
+    /// Volatile: after a boot, the next trim jump proves it again.
+    trimmed: bool,
 }
 
 impl ReplicaNode {
@@ -337,6 +343,7 @@ impl ReplicaNode {
             pending_sealed_reads: Vec::new(),
             counters: ReplicaCounters::default(),
             catchup_asked: None,
+            trimmed: false,
         };
         for (slot, record) in above {
             // A record past the end of a sealed segment is not this
@@ -431,7 +438,12 @@ impl ReplicaNode {
                     self.counters.ignored += 1;
                 }
             }
-            Message::TrimmedTo { from, point, state } => self.on_trimmed_to(from, point, state),
+            Message::TrimmedTo {
+                from,
+                point,
+                state,
+                first_seq,
+            } => self.on_trimmed_to(from, point, state, first_seq),
             // A replica is no acceptor: the floor a beat carries is for the
             // acceptors it retires, not for it.
             Message::Heartbeat {
@@ -483,7 +495,7 @@ impl ReplicaNode {
         self.quorum_reads
             .expire(self.tick_count, self.limits.read_window);
         self.serve_quorum_reads();
-        let first_faulty = self.faulty.first().copied();
+        let first_faulty = self.faulty.first().copied().filter(|_| !self.trimmed);
         if let Some(from_slot) = first_faulty {
             let targets: Vec<NodeId> = match self.leader {
                 Some(leader) => vec![leader],
@@ -626,7 +638,7 @@ impl ReplicaNode {
         }
         self.learn_config(ballot, config);
         // A sealed replica holds its whole segment: it pulls nothing more.
-        if commit > self.replica.chosen_index() && !self.replica.is_sealed() {
+        if commit > self.replica.chosen_index() && !self.replica.is_sealed() && !self.trimmed {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
         self.report_held(from);
@@ -876,8 +888,8 @@ impl ReplicaNode {
     /// A peer's trim point: only a pooled node's, and only as the answer to
     /// a request of this replica below the point. An unasked point (a peer
     /// that pushes its prefix) makes the replica ask that peer.
-    fn on_trimmed_to(&mut self, from: NodeId, point: Slot, state: JournalState) {
-        if !self.in_pool(from) || point <= self.floor {
+    fn on_trimmed_to(&mut self, from: NodeId, point: Slot, state: JournalState, first_seq: Seq) {
+        if !self.in_pool(from) || point <= self.floor || self.trimmed {
             self.counters.ignored += 1;
             return;
         }
@@ -885,6 +897,28 @@ impl ReplicaNode {
         // need, would carry this replica out of the segment it keeps (R6).
         if self.replica.is_sealed() || Some(state.segment.id) != self.replica.segment_bound() {
             self.counters.past_end += 1;
+            // A lagging replica of a segment that a `Truncate` released gets
+            // only trim points of later segments: the acceptors dropped the
+            // segment with no report (R7). A state that proves every write
+            // of the segment released ends the copy for good: there is
+            // nothing left to hold (`TrimProof` of
+            // `specs/tla/held-floor-trimmed/`).
+            if let Some(bound) = self.replica.segment_bound()
+                && !self.replica.is_sealed()
+                && !self.trimmed
+                && state.releases(bound, first_seq)
+            {
+                probe!(
+                    reachable,
+                    "replica: a lagging replica finds its whole segment released"
+                );
+                self.trimmed = true;
+                self.catchup_asked = None;
+                assert!(
+                    self.replica.segment_bound() == Some(bound),
+                    "a trimmed replica keeps the segment it found released"
+                );
+            }
             return;
         }
         if self.open_catch_up().is_none_or(|asked| asked >= point) {
@@ -984,6 +1018,7 @@ impl ReplicaNode {
         // A pull goes to an acceptor, never to a replica (itself included).
         assert!(to != self.config.id, "a replica never pulls from itself");
         assert!(self.in_pool(to), "a replica pulls only from a pooled node");
+        assert!(!self.trimmed, "a trimmed replica pulls nothing");
         self.counters.catch_up_requests += 1;
         let open = self.open_catch_up();
         self.catchup_asked = Some(open.map_or(from_slot, |a| a.min(from_slot)));
@@ -1145,6 +1180,14 @@ impl ReplicaNode {
     pub(crate) fn assert_invariants(&self) {
         self.belief.assert_invariants(self.config.pool());
         assert!(
+            !self.trimmed || self.replica.segment_bound().is_some(),
+            "only a replica bound to a segment finds it released"
+        );
+        assert!(
+            !self.trimmed || self.catchup_asked.is_none(),
+            "a trimmed replica asks for nothing"
+        );
+        assert!(
             self.floor <= self.replica.first_unchosen(),
             "a replica's floor never outruns its chosen prefix"
         );
@@ -1302,6 +1345,23 @@ impl ReplicaNode {
         self.belief.config()
     }
 
+    /// Whether this replica found the segment it keeps released while it
+    /// lagged (a trim jump proved every write of it below `first_seq`): it
+    /// has nothing left to copy, pulls nothing and serves no read
+    /// ([`LogRead::NotHeld`](crate::replica::LogRead::NotHeld)).
+    ///
+    /// # Panics
+    ///
+    /// If a replica bound to no segment is trimmed: a programmer error.
+    #[must_use]
+    pub fn is_trimmed(&self) -> bool {
+        assert!(
+            !self.trimmed || self.replica.segment_bound().is_some(),
+            "only a replica bound to a segment finds it released"
+        );
+        self.trimmed
+    }
+
     /// The compaction floor: the first slot whose record is retained.
     ///
     /// # Panics
@@ -1326,6 +1386,11 @@ impl ReplicaNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
+        // A trimmed replica holds its segment in part, and the journal
+        // released all of it: the reader asks elsewhere.
+        if self.trimmed {
+            return crate::replica::LogRead::NotHeld;
+        }
         let read = self.replica.read(&self.records, from, limit, max_bytes);
         if let crate::replica::LogRead::Page(page) = &read {
             assert!(

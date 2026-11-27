@@ -221,7 +221,11 @@ Test only: `publish = false`, never a dependency of another crate.
   have values to propose again, until the next roll, which goes to such a leader first; it must
   reach a valid `Roll`, two `Roll` rounds open at once, a trim jump past a `Roll`, and a `Roll`
   admitted while the recovery still holds values to propose again, and a publish of a segment's
-  end that a majority of the matchmakers holds), and the journal controller (`healing`: matchmakers,
+  end that a majority of the matchmakers holds), the same walk with two replica sites as the
+  replicas of the first segment (`segment-replicas`, `Config::segment_replicas`: they report it
+  held, the acceptors drop its unreleased records at the `Hold`, and a replica that lagged while
+  a `Truncate` released it stops as trimmed; the liveness judge takes a sealed replica as done
+  at its end and a trimmed one as done), and the journal controller (`healing`: matchmakers,
   three spares and two controllers; a member stops for good at the calm, and the controllers
   replace it and retire the spare that leaves; the operator makes no move). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of

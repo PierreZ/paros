@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::journal::state::JournalState;
-use crate::journal::{Command, ReplicaSet, SegmentId};
+use crate::journal::{Command, ReplicaSet, SegmentId, Seq};
 use crate::membership::{AcceptorConfig, ProxyId};
 use crate::types::{Ballot, NodeId, Slot};
 
@@ -422,6 +422,12 @@ pub enum Message {
         /// journal fold would restart from nothing and judge every later write
         /// against the wrong writer and the wrong next position.
         state: JournalState,
+        /// The serving peer's `first_seq` at the head of its fold, at or
+        /// above `state.first_seq`. A lagging replica of a segment that the
+        /// trim point passed reads from it whether the journal released
+        /// that segment ([`JournalState::releases`]): the state at the
+        /// point can predate the `Truncate` that raised the point.
+        first_seq: Seq,
     },
 
     // ---- Cooperative leader handoff (DPaxos "Leader Handoff") ----

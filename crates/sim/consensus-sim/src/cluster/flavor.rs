@@ -51,6 +51,11 @@ pub struct Flavor {
     /// configuration in force stops for good when the faults stop
     /// (`cluster/control.rs`).
     pub controllers: bool,
+    /// The replicas of the first segment are the replica sites
+    /// (`Config::segment_replicas`): once a `Roll` seals it, they report
+    /// it whole (`Message::SegmentHeld`), and the leader holds it with a
+    /// `Hold` that drops its records at the acceptors (R7 of §4.7).
+    pub segment_replicas: bool,
 }
 
 /// The steer of a walk: the one rare protocol event that the walk moves
@@ -116,6 +121,7 @@ impl Flavor {
             limits: Limits::DEFAULT,
             mutant: None,
             controllers: false,
+            segment_replicas: false,
         }
     }
 
@@ -406,6 +412,22 @@ impl Flavor {
                 ..Limits::DEFAULT
             },
             ..Self::matchmakers()
+        }
+    }
+
+    /// Segments with replicas (R6 and R7 of §4.7): the walk of
+    /// [`segments`](Flavor::segments), and two replica sites that are the
+    /// replicas of the first segment (`Config::segment_replicas`). Once a
+    /// `Roll` seals it, they report it held, and the acceptors drop its
+    /// records at the `Hold`; a replica that lags while a `Truncate`
+    /// releases the segment finds it released at a trim jump and stops.
+    #[must_use]
+    pub fn segment_replicas() -> Self {
+        Self {
+            name: "segment-replicas",
+            replicas: 2,
+            segment_replicas: true,
+            ..Self::segments()
         }
     }
 

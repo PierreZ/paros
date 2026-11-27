@@ -294,6 +294,14 @@ fn tlc_accepts_the_segment_walks() {
     accepts(Spec::Matchmaker, &Flavor::segments());
 }
 
+/// The walks with replicas of the first segment: the matchmaker spec
+/// follows the votes and choices around the `Hold`s and the drops at the
+/// acceptors.
+#[test]
+fn tlc_accepts_the_segment_replica_walks() {
+    accepts(Spec::Matchmaker, &Flavor::segment_replicas());
+}
+
 #[test]
 fn tlc_accepts_the_reconfigured_compartment_walks() {
     accepts(Spec::MatchmakerGrid, &Flavor::reconfiguring());

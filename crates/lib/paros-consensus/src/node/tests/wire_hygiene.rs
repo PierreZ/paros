@@ -351,6 +351,7 @@ fn a_trim_point_from_a_stranger_is_ignored() {
         from,
         point: Slot(4),
         state: crate::journal::state::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     };
     let _ = n.catch_up_request(Slot(0));
     n.step(trimmed(NodeId(9)));
@@ -370,6 +371,7 @@ fn an_unasked_trim_point_makes_the_node_ask() {
         from: NodeId(0),
         point: Slot(4),
         state: crate::journal::state::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     };
     n.step(trimmed.clone());
     assert_eq!(
@@ -397,6 +399,7 @@ fn an_unasked_trim_point_makes_the_node_ask() {
         from: NodeId(0),
         point: Slot(8),
         state: crate::journal::state::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(
         n.acceptor.first_slot(),
@@ -435,6 +438,7 @@ fn a_request_answered_by_entries_closes_the_trim_point_gate() {
         from: NodeId(0),
         point: Slot(8),
         state: crate::journal::state::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(
         n.acceptor.first_slot(),
@@ -540,6 +544,7 @@ fn a_message_in_the_nodes_own_name_is_dropped() {
             from: NodeId(0),
             point: Slot(9),
             state: crate::journal::state::JournalState::default(),
+            first_seq: crate::journal::Seq(0),
         },
     ];
     for echo in echoes {

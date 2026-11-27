@@ -414,6 +414,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
             replicas: None,
             held: None,
         },
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -451,6 +452,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
         from: NodeId(0),
         point: Slot(4),
         state: crate::journal::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     assert_eq!(n.hard_state().chosen_index, Some(Slot(5)));
     assert_eq!(n.acceptor().first_slot(), Slot(6));
@@ -485,6 +487,7 @@ fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
         from: NodeId(2),
         point: Slot(10),
         state: crate::journal::JournalState::default(),
+        first_seq: crate::journal::Seq(0),
     });
     let _ = drain(&mut x);
 

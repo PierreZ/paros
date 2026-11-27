@@ -91,6 +91,12 @@ pub mod reach {
     /// values to propose again (`Recovery::pending`), which its tail reads
     /// (R4c).
     pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
+    /// A node dropped the records of a held segment that no `Truncate`
+    /// released: its replicas hold it (R7).
+    pub const HELD_DROP: &str = "cluster: a node dropped a held segment no Truncate released";
+    /// A replica that lagged found its whole segment released at a trim
+    /// jump, and stopped (R6, R7).
+    pub const REPLICA_TRIMMED: &str = "cluster: a lagging replica found its segment released";
     /// A majority of the matchmakers holds a node's publish of the end of a
     /// segment (R5): the chain grows.
     pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
@@ -702,9 +708,21 @@ impl Model for Cluster {
                 ));
             }
         }
-        for site in &self.replicas {
+        // A replica keeps one segment (R6): a sealed one learned all it
+        // keeps once it reached the end of its segment, and one that found
+        // its segment released while it lagged keeps nothing more.
+        for site in self
+            .replicas
+            .iter()
+            .filter(|s| !s.live.as_ref().is_some_and(ReplicaNode::is_trimmed))
+        {
             let reached = site.live.as_ref().map(|r| r.replica().first_unchosen());
-            if reached.is_none_or(|r| r < frontier) {
+            let end = site
+                .live
+                .as_ref()
+                .and_then(|r| r.replica().sealed_end())
+                .map_or(frontier, |end| end.min(frontier));
+            if reached.is_none_or(|r| r < end) {
                 return Err(format!(
                     "replica {} reached {reached:?}, the frontier is {}",
                     site.id.0, frontier.0
@@ -987,6 +1005,9 @@ impl Cluster {
             matchmakers,
             proxy_count: usize::try_from(self.flavor.proxies).expect("a few proxies"),
             replica_count: usize::try_from(self.flavor.replicas).expect("a few replicas"),
+            segment_replicas: self.flavor.segment_replicas.then(|| {
+                ReplicaSet::new((0..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)))
+            }),
             ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
         }
     }
@@ -1487,6 +1508,16 @@ impl Cluster {
                 _ => {}
             }
         }
+        if let Some(node) = self.node(id).live.as_ref() {
+            let journal = node.replica().journal();
+            sometimes!(
+                journal
+                    .held
+                    .is_some_and(|held| held.next_seq > journal.first_seq
+                        && node.acceptor().first_slot() >= held.end),
+                reach::HELD_DROP
+            );
+        }
         let synced = MustSync::for_batch(writes) == MustSync::Sync;
         if synced {
             self.node_mut(id).sync();
@@ -1661,6 +1692,7 @@ impl Cluster {
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             ready.advance();
+            sometimes!(replica.is_trimmed(), reach::REPLICA_TRIMMED);
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
             {
                 self.fold_digest(digest);

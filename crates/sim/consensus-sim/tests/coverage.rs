@@ -78,6 +78,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::handover(),
         Flavor::lagging_reads(),
         Flavor::segments(),
+        Flavor::segment_replicas(),
         Flavor::healing(),
     ];
     let paged = [
