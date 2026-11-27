@@ -80,7 +80,21 @@ jobs:
       # #248 (TigerStyle assertions): the assertions per function of paros-consensus only go up.
       # The floor is the density of main, to four places; a pull request that raises the density raises it.
       - name: Check the paros-consensus assertion density
-        run: scripts/count-assertions.py --min 1.7118
+        run: scripts/count-assertions.py --min 1.7137
+      # scripts/mutants.sh: cargo-mutants 27.1 deletes the fields of some struct updates in every
+      # run, whatever `--re` says, so each such mutant costs every second pass of the nightly about
+      # 20 minutes of trace checks. A list that matches nothing must be empty. `--list` builds
+      # nothing.
+      - name: Check that every mutant of paros-consensus obeys --re
+        # The list goes to a file inside the shell: the dev shell prints a banner on stdout, and a
+        # cargo-mutants that fails fails the step.
+        run: |
+          nix develop --command bash -c 'cargo mutants --list -p paros-consensus --re "^$" > "$RUNNER_TEMP/ignore-re.txt"'
+          if [ -s "$RUNNER_TEMP/ignore-re.txt" ]; then
+            echo "These mutants ignore --re (a struct update); write the fields one by one:"
+            cat "$RUNNER_TEMP/ignore-re.txt"
+            exit 1
+          fi
       # docs/architecture/04-roles.md §4.4: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh

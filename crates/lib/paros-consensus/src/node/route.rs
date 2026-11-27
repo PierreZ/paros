@@ -80,8 +80,10 @@ impl ColocatedNode {
             return;
         }
         let me = self.config.id;
-        let mut slot = from;
-        while slot < folded {
+        // Only a slot with a choosing ballot routes: `routable` holds no
+        // slot at or past the fold, by the split above.
+        for (&slot, &ballot) in routable.range(from..) {
+            assert!(slot < folded, "a routable slot lies below the fold");
             let state = self.replica.journal_at(slot);
             assert!(
                 state.segment.start <= slot,
@@ -91,7 +93,7 @@ impl ColocatedNode {
                 .replicas
                 .clone()
                 .or_else(|| self.config.segment_replicas.clone());
-            if let (Some(replicas), Some(&ballot)) = (replicas, routable.get(&slot)) {
+            if let Some(replicas) = replicas {
                 // The record's ballot is not compared with the choosing one:
                 // a slot learned first with no choosing ballot (a handoff's
                 // decided tail) keeps its record when a later `Commit` at a
@@ -113,7 +115,6 @@ impl ColocatedNode {
                     },
                 ));
             }
-            slot = Slot(slot.0 + 1);
         }
         assert!(
             self.segment_routed == self.replica.folded(),

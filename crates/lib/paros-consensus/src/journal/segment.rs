@@ -290,6 +290,20 @@ mod tests {
     }
 
     #[test]
+    fn a_replica_set_converts_to_its_members_and_names_its_errors() {
+        let members: Vec<NodeId> = ReplicaSet::new([NodeId(3), NodeId(1)]).into();
+        assert_eq!(members, vec![NodeId(1), NodeId(3)]);
+        assert_eq!(
+            ReplicaSetError::Empty.to_string(),
+            "a replica set names at least one node"
+        );
+        assert_eq!(
+            ReplicaSetError::Duplicate(NodeId(4)).to_string(),
+            "a replica set names node 4 twice"
+        );
+    }
+
+    #[test]
     fn a_replica_set_is_sorted_and_refuses_an_empty_list_or_a_repeat() {
         let set = ReplicaSet::new([NodeId(3), NodeId(1)]);
         assert_eq!(set.members(), &[NodeId(1), NodeId(3)]);

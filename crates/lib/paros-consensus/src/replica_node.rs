@@ -826,13 +826,17 @@ impl ReplicaNode {
     /// If an internal invariant is broken (a programmer error).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, start = start.0)))]
     pub fn join_segment(&mut self, start: Slot, boundary: JournalState) -> Result<(), JoinRefusal> {
-        if self.floor != Slot(0)
-            || self.replica.chosen_index().is_some()
-            || !self.records.is_empty()
+        // Fresh: no record, no fold and no chosen slot. A chosen slot whose
+        // record rotted on the disk leaves no record and no fold after a
+        // reboot, so the chosen index is a leg of its own. A raised floor
+        // lies at or below the fold (`Replica::folded`), so it is asserted.
+        if !self.records.is_empty()
             || self.replica.folded() != Slot(0)
+            || self.replica.chosen_index().is_some()
         {
             return Err(JoinRefusal::NotFresh);
         }
+        assert!(self.floor == Slot(0), "a fresh replica's floor is slot 0");
         if start.0 == 0
             || !boundary.is_well_formed()
             || boundary.segment.start != start
