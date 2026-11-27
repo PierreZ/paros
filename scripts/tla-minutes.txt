@@ -26,6 +26,7 @@ handover 10
 handover-chain 7.5
 handover-gc 1.5
 handover-scalars 2
+heal-learn 0.1
 held-floor 21
 held-floor-hold 17
 held-floor-pass 18
@@ -46,6 +47,7 @@ read-replica 1
 reads 22
 reads-rows4 9
 retire-fence 18
+segment-reseat 1.7
 segment-roll 7.5
 takeover 6.5
 truncation 7.5

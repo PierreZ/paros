@@ -149,3 +149,6 @@ replacement of a replica of a segment is an order, as the replacement of a silen
 The four open points of this split are in R8 of §4.7: a tally that counts only the set in force,
 the heal of a sealed segment at the matchmakers that the fold does not see, `ReplicaFeedback`
 with no fact of a segment, and who proposes the heal. Each one gets its model before its code.
+The recommendation of 2026-11-27 for the last point (R8, which Pierre may overrule): the
+controller orders the heal, the leader node runs its `Decree` at the matchmakers, and every
+party learns the healed set from the chain.

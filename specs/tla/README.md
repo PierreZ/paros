@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-reseat/` (the held tally across a change of the replica set); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-reseat/` (the held tally across a change of the replica set); `segment-reseat/` (the route, the join and the removed member across a `SetReplicas`); `heal-learn/` (the heal of a sealed segment, learned from the chain); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2981,10 +2981,58 @@ check has `F = 1`, three losses and `N = 2`.
 | `back_nostamp` | ci | violation of `Kept`: the control `Stamp = "none"`; `c` reports at version 0, is released and drops its copy, the heal adds it back, its old report counts, and `a` is released |
 
 What is not in the model: the routing of a `SetReplicas` and what a new replica serves before it
-is whole (`segment-reseat/`, D10), a second heal, who proposes the heal, and how the tally learns
+is whole (`segment-reseat/`), a second heal, who proposes the heal, and how the tally learns
 a heal from the chain (the liveness Open of R8). The tally of the code (`collector/held.rs`)
 deletes the reports of a segment at `Held` and refuses later reports of it, so it must change
 before a set can change.
+
+### `segment-reseat/`: a `SetReplicas` of the open segment, for step 5d of the segments in the core
+
+D10 of `docs/architecture/04-7-segments.md`: the decided command `SetReplicas` at slot `SetAt`
+replaces the set `Old` of the open segment by `New`. `SegmentReseat.tla` checks three rules
+across the change. The leader routes the `Commit` of a slot to the set that its fold names there
+now. A new member pulls the slots that it lacks; a pull is one step here, and its sources are
+checked by `held-floor/` and `peer-pull/`. A removed member that walked the `SetReplicas` pulls
+no more and answers a read above it with "moved". The slots are chosen in any order, and slot
+`SetAt` holds the `SetReplicas` or a `Noop` of a new leader. `Sound` is the safety (a replica
+holds only chosen slots, and only a replica that a set named holds any; a read is served from the
+walked prefix); `Whole` and `Answered` are the liveness, under fair steps. The join from the
+boundary state of the chain is `compartments/`. The rule is a proposal, modelled and not built:
+`Command::SetReplicas` is not in the code yet.
+
+| Check | CI | Result |
+|---|---|---|
+| `reseat` | ci | pass of `Sound`, `Whole`, `Answered` and `ReadOnce` (an answered read keeps its answer): `SetReplicas` at slot 2 replaces `a` by `c` (0.11 million distinct states) |
+| `reach_moved` | ci | violation of `NoMoved`: the removed `a` answers a read with "moved" |
+| `route_proposed` | ci | violation of `Sound`: the control `Route = "proposed"` routes by the proposed `SetReplicas`, before it is chosen; the new `c` holds a slot that no chosen set names |
+| `no_pull` | ci | violation of `Whole`: the control `Pull = FALSE`; the new `c` never gets the slots below the `SetReplicas` |
+| `no_moved` | ci | violation of `Answered`: the control `Moved = FALSE`; a read of slot 3 at the removed `a` waits for ever |
+
+What is not in the model: the held tally across the change (`held-reseat/`), the drop of the
+segment at the acceptors (then a pull goes to a peer, `peer-pull/`, over one fixed set), and the
+pages of a long segment.
+
+### `heal-learn/`: the heal of a sealed segment, learned from the chain, for step 6 of the segments in the core
+
+The liveness Open of R8 of `docs/architecture/04-7-segments.md`. On the recommendation of R8,
+the journal controller orders the heal of a sealed segment and the leader node runs its `Decree`
+at the matchmakers. The `Decree` may be decided after that node lost its leadership, and the fold
+of the log does not see it. `HealLearn.tla` checks that the tally of the leader still judges the
+segment over the healed set (`Heals`), through changes of leader that empty the tally, while the
+new replica must learn that the set names it before it pulls the segment and reports it. The
+rule (`Learn = "beat"`): the leader and the new replica read the heal from the chain on each
+beat. The model checks liveness only: the controls show that a read on each beat is enough, and
+the safety of the tally across the heal is `held-reseat/`. A proposed rule, modelled and not
+built.
+
+| Check | CI | Result |
+|---|---|---|
+| `beat` | ci | pass of `Sound` and `Heals`: two changes of leader |
+| `own` | ci | violation of `Heals`: the control `Learn = "own"`; only the node that ran the `Decree` learns it, and it loses its leadership before the `Decree` is decided |
+| `election` | ci | violation of `Heals`: the control `Learn = "election"`; a leader reads the chain only as it wins, and the heal is decided after the last election |
+
+What is not in the model: how the chain carries the heal (a field of the answers of the
+matchmakers, not built), the tally itself (`held-reseat/`), and the pull (`peer-pull/`).
 
 ### `peer-pull/`: the pull of a lagging replica from a peer of its segment, for step 6 of the segments in the core
 
