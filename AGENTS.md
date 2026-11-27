@@ -100,7 +100,7 @@ model of `truncation-reconfig/`: a reconfiguration onto an empty member after th
 `specs/tla/held-floor-trimmed/`: a lagging replica of a released segment stops as trimmed; a
 lagging replica of a held segment copies it from a peer, `CanCopy` of `held-floor/` for safety and
 `specs/tla/peer-pull/` for liveness: the pull turns over the replica peers only; the held tally
-across a change of the replica set, `specs/tla/held-reseat/` (adopted by Pierre on 2026-11-27), and the route, the join and the removed member across a `SetReplicas`, `specs/tla/segment-reseat/`, and the heal of a sealed segment learned from the chain, `specs/tla/heal-learn/`, proposed rules, modelled and not built), and the boundaries of
+across a change of the replica set, `specs/tla/held-reseat/`, a rule that Pierre adopted on 2026-11-27, not built; and two proposed rules, modelled and not built: the route, the join and the removed member across a `SetReplicas`, `specs/tla/segment-reseat/`, and the heal of a sealed segment learned from the chain, `specs/tla/heal-learn/`), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag

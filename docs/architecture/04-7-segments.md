@@ -334,9 +334,10 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
     copy and came back counts with its old report); each loses a slot. The tally of the code
     (`collector/held.rs`) must change two ways for it: its reports are kept by segment and
     version, and a held segment takes reports again after a change of its set (today `judge`
-    deletes the reports at `Held` and `report` refuses a held segment). That change comes with
-    the first code that changes a set (`SetReplicas`, step 5d): before it, the version of every
-    segment is 0. The fault rule above stays a reading of this step. The routing of
+    deletes the reports at `Held` and `report` refuses a held segment). My reading of the
+    order of work: that change comes with the first code that changes a set (`SetReplicas`,
+    step 5d), since before it the version of every segment is 0. The fault rule above is still
+    a reading, not decided. The routing of
     `SetReplicas` and the join of a new replica are `segment-reseat/` (D10).
   - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
     the leader's fold does not see. The tally and the route must learn the new set from the
