@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-reseat/` (the held tally across a change of the replica set); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2945,6 +2945,39 @@ The check with a command at slot 0 and the `Roll` at slot 1 is long.
 
 What is not in the model: a third configuration, the restart and the faulty record of
 `truncation/`, and the chain at a matchmaker quorum.
+
+### `held-reseat/`: the held tally across a change of the replica set of a segment, for step 6 of the segments in the core
+
+The first Open of R8 of `docs/architecture/04-7-segments.md`. A segment is `Held` once `F + 1`
+of its replicas reported it whole, and then the acceptors drop it (R7). The set of a segment
+changes by a `SetReplicas` of the open segment at slot `SetAt` (D10: each `Commit` above it goes
+to the new set), or by a heal of the sealed segment, a `Decree` at the matchmakers that replaces
+`HealOut` by `HealIn` and that the fold does not see. `HeldReseat.tla` is standalone: the log is
+slots `1..N`, chosen in order, the `Roll` at `N` (`held-floor/` checks the log and the floor).
+Each change of the set is a new version, and the held mark names the version that it judged. A
+removed replica keeps its copy until the segment is held at the version in force (`Released`),
+and the fault rule counts it with the set in force until then: at most `F` protected replicas
+are lost and not yet whole at one time. A released replica may lose its copy at any time. Any
+replica that a set named may report, a removed one too, so the tally sorts the reports.
+`Kept`: once the acceptors dropped the segment, each slot is held by some replica. `Sound`, in
+every check: a replica holds only chosen slots, only a replica that a set named holds any, the
+acceptors hold nothing once they dropped the segment, and a heal comes only on a sealed segment.
+Every guard mutant is caught (`scripts/mutate-tla.py held-reseat`: 13 caught).
+
+| Check | CI | Result |
+|---|---|---|
+| `open` | ci | pass of `Kept`: `SetReplicas` at slot 1 replaces `c` by `d`, the rule (`Count = "inforce"`, `Report = "whole"`), `F = 1`, two losses |
+| `reach_open` | ci | violation of `NoRelease`: the constants of `open`; the removed `c` is released |
+| `open_ever` | ci | violation of `Kept`: the control `Count = "ever"` counts the report of the removed `c` |
+| `open_routed` | ci | violation of `Kept`: the control `Report = "routed"`; the new `d` reports without slot 1 |
+| `heal` | ci | pass of `Kept`: a heal of the sealed segment replaces `a` by `d`; the tally judges the segment again over `b`, `c`, `d` |
+| `heal_fold` | ci | violation of `Kept`: the control `Count = "fold"` knows only the set of the fold; its mark stands after the heal and releases `a` |
+| `heal_ever` | ci | violation of `Kept`: the control `Count = "ever"` judges again at once over `a` and `b` |
+| `reach_heal` | ci | violation of `NoHeldAfterHeal`: the constants of `heal`; the tally marks the segment held again after the heal |
+
+What is not in the model: the routing of a `SetReplicas` and what a new replica serves before it
+is whole (`segment-reseat/`, D10), who proposes the heal, and how the tally learns a heal from the
+chain (the Open on liveness of R8).
 
 ### `peer-pull/`: the pull of a lagging replica from a peer of its segment, for step 6 of the segments in the core
 

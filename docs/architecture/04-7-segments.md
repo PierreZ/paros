@@ -308,10 +308,18 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   set (peer catch-up), and there is no choice to make. The journal controller (§4.8) changes the
   set: a replacement is an order, as autoscaling is. No code comes before the models of the four
   points below:
-  - **Open** (safety): the held tally never forgets a report (R7). Across a change of the set
-    it must count a report only from a member of the set in force, and a new member counts as
-    down until it holds the segment whole. Model first: a TLA+ pass and a control, with
-    `specs/tla/segment-reseat/` (D10) and a model of the heal of a sealed segment.
+  - **Modelled, not built** (safety): the held tally across a change of the set, by a
+    `SetReplicas` of the open segment (D10) or a heal of a sealed one. `specs/tla/held-reseat/`
+    checks the rule: the tally counts a report only from a member of the set in force; a
+    replica reports only once it holds the segment whole, so a new member counts as down until
+    then; each change of the set is a new version, the held mark names the version that it
+    judged, and a heal makes the tally judge the segment again. A removed replica keeps its
+    copy until the segment is held at the version in force (it is released then), and only a
+    released replica may drop its copy outside the F failures. The controls: a tally that
+    counts any report (`open_ever`, `heal_ever`), a report of only the routed slots
+    (`open_routed`), and a tally that knows only the set of the fold, so it neither sees a heal
+    nor judges again (`heal_fold`); each loses a slot. The routing of `SetReplicas` and the join
+    of a new replica stay for `specs/tla/segment-reseat/` (D10).
   - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
     the leader's fold does not see. The tally and the route must learn the new set from the
     chain.

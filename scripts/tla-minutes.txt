@@ -32,6 +32,7 @@ held-floor-pass 18
 held-floor-reconfig 8
 held-floor-released 6
 held-floor-trimmed 11
+held-reseat 1
 held-floor-retry 22
 journal-ids 6
 leader-handoff 15
