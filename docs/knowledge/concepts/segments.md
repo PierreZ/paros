@@ -167,10 +167,10 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   2026-11-26). This is a rule of paros, not of a paper. Safety is the copy from a peer of
   `specs/tla/held-floor/` (`CanCopy`); liveness is `Heals` of `specs/tla/peer-pull/`.
   When the replica set of a segment changes (a `SetReplicas` of the open segment, or a heal of a
-  sealed one), a proposed rule, modelled in `specs/tla/held-reseat/`, has the held tally count
+  sealed one), the rule that Pierre adopted on 2026-11-27, modelled in `specs/tla/held-reseat/`, has the held tally count
   only whole reports of the set in force made at the version of the set in force, and judge the
   segment again at each new version; a removed replica keeps its copy until then. It is not
-  decided and not built: no code changes a set yet.
+  built: no code changes a set yet.
 
 ## 10. Pitfalls
 
