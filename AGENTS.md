@@ -259,7 +259,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
-  that changes nothing, with its reason.
+  that changes nothing, with its reason. The core writes no struct update (`Self { a: x, ..base }`):
+  cargo-mutants 27.1 deletes its fields in every run, whatever `--re` says, so each one adds
+  about 20 minutes to every second pass; the `checks` job fails on one.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
   `scripts/check-layers.sh --wasm` (each crate of layers 0 to 5), and

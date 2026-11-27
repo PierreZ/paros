@@ -629,3 +629,40 @@ fn a_held_tail_is_a_bug() {
     };
     state.assert_invariants();
 }
+
+/// The tail segment's postconditions hold against a state they did not
+/// come from: a tail that went back is a bug.
+#[test]
+#[should_panic(expected = "a journal's tail segment never goes back")]
+fn a_tail_segment_that_goes_back_is_a_bug() {
+    let before = JournalState {
+        segment: Segment::default().rolled_at(Slot(2)),
+        ..JournalState::default()
+    };
+    JournalState::default().assert_segment(&before, Slot(3), &Outcome::Noop);
+}
+
+/// A `Roll` that reports another tail than the one after it is a bug.
+#[test]
+#[should_panic(expected = "a Roll reports the tail after it")]
+fn a_roll_that_reports_another_tail_is_a_bug() {
+    let after = JournalState {
+        segment: Segment::default().rolled_at(Slot(2)),
+        ..JournalState::default()
+    };
+    let other = Segment::default().rolled_at(Slot(4));
+    after.assert_segment(&JournalState::default(), Slot(2), &Outcome::Rolled(other));
+}
+
+/// An ignored `Roll` that names another tail than the one it was judged
+/// against is a bug.
+#[test]
+#[should_panic(expected = "an ignored Roll names the tail it was judged against")]
+fn an_ignored_roll_that_names_another_tail_is_a_bug() {
+    let other = Segment::default().rolled_at(Slot(4));
+    JournalState::default().assert_segment(
+        &JournalState::default(),
+        Slot(5),
+        &Outcome::RollIgnored(other),
+    );
+}

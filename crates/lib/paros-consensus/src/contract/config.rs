@@ -227,11 +227,13 @@ impl Config {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recorded(&self) -> Self {
-        let recorded = Self {
-            proxy_count: 0,
-            replica_count: 0,
-            ..self.clone()
-        };
+        // Two assignments, not a struct update: cargo-mutants 27.1 deletes
+        // each field of a struct update in every run, whatever `--re`
+        // says, which adds those mutants to each second pass of
+        // `scripts/mutants.sh`.
+        let mut recorded = self.clone();
+        recorded.proxy_count = 0;
+        recorded.replica_count = 0;
         assert!(
             !recorded.has_proxies() && !recorded.has_replicas(),
             "the format marker records no count"
