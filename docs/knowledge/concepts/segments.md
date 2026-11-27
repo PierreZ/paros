@@ -166,6 +166,11 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   set), and a peer answers with the chosen records it holds (`ReplicaNode`, R8 of §4.7; Pierre,
   2026-11-26). This is a rule of paros, not of a paper. Safety is the copy from a peer of
   `specs/tla/held-floor/` (`CanCopy`); liveness is `Heals` of `specs/tla/peer-pull/`.
+  When the replica set of a segment changes (a `SetReplicas` of the open segment, or a heal of a
+  sealed one), a proposed rule, modelled in `specs/tla/held-reseat/`, has the held tally count
+  only whole reports of the set in force made at the version of the set in force, and judge the
+  segment again at each new version; a removed replica keeps its copy until then. It is not
+  decided and not built: no code changes a set yet.
 
 ## 10. Pitfalls
 

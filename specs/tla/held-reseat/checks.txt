@@ -1,0 +1,17 @@
+# The held tally across a change of the replica set of a segment (R7 and
+# the first Open of R8 of docs/architecture/04-7-segments.md): a
+# `SetReplicas` of the open segment (D10) and a heal of a sealed one.
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+open         pass       ci
+reach_open   violation  ci
+open_ever    violation  ci
+open_routed  violation  ci
+heal         pass       ci
+heal_fold    violation  ci
+heal_ever    violation  ci
+reach_heal   violation  ci
+back         pass       ci
+back_nostamp violation  ci
