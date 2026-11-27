@@ -76,7 +76,8 @@ learners reaches every replica, and with pure voters that `Commit` goes away. No
 replicas, the chain in the matchmaking and probe answers, and the walk of consensus-sim with
 replicas of segments that join from the chain. Two limits of a bound replica wait
 for step 6. **Open** (step 6): the acceptors may compact past the `Roll` of a segment before its
-replicas hold it, since the floor at `Held` (R7) is not built; a replica of that segment that
+replicas hold it, since the compaction of a `Truncate` does not wait for `Held` (R7: a segment
+that a `Truncate` released counts as held); a replica of that segment that
 lags below the `Roll` then gets only trim points of a later segment, refuses each one, and never
 seals. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
 hole below the `Roll`) stays in its durable store; the seal drops it from memory and the boot
@@ -218,21 +219,34 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   when its position is below the position at the `Roll`, because positions follow the slot
   order (this equivalence is a reading of this step). `Held` is never an ack and carries no
   fence verdict: a write below that position with a stale uuid or other bytes is `Held` too, and
-  the replicas of the segment answer what the log holds. Not built yet: the drop of a held
-  segment at the acceptors. **Proposed** (2026-11-26, Pierre's card is open; the rule is in the model, not in the code): a
-  released segment counts as held. A segment whose writes all lie below `first_seq` is marked
-  `Held` with no replica, since a `Truncate` already released its records; a segment with no
-  write is released as soon as it ends. The held segments are a prefix, so without this rule a
+  the replicas of the segment answer what the log holds. The drop at the acceptors is a policy
+  of the replica (`replica::HeldRecords`): the replica of a `ColocatedNode` drops
+  (`HeldRecords::Drop`, set at the boot), and a `ReplicaNode` keeps (`Keep`), since a bound
+  replica keeps the segment that it is bound to. When the fold applies a `Hold`, a dropping
+  replica asks for a compaction (`Replica::advance` returns a target), and
+  `Replica::compaction_target` raises the floor to the end of the held prefix
+  (`HoldDrop = "keep"` of `specs/tla/held-floor-hold/`). The floor then walks down to the fixed
+  point of the retries, as for a `Truncate`. A retry that folded `Held` reads no record, so it
+  holds no floor down. **Decided** (Pierre, 2026-11-26): a released
+  segment counts as held. A segment whose writes all lie below `first_seq` is marked
+  `Held` with no replica, since a `Truncate` already released its records; in the model, a
+  segment with no write is released as soon as it ends. The code releases a segment with no
+  write once `first_seq` reaches its position, never earlier (`HeldTally::judge`): a `Roll`
+  never sets the replicas back to none, so the segments with no replicas are a prefix, and an
+  empty one has the position of the segment before it, which needs the same release. The held segments are a prefix, so without this rule a
   segment with no replicas (the first segment of a journal with no `Config::segment_replicas`)
   stops every `Hold` after it. The check is `Skip = "released"` of
   `specs/tla/held-floor-released/`: a released segment with no replicas, then a held segment
   with one, and the floor passes both (`reach_skip`; with `Skip = "none"` it never does,
   `skip_none`). Its control `norep` (a segment with no replicas marked `Held` at once) loses a
-  record, and `released_part` keeps a segment that a `Truncate` released only in part. **Open**
-  (the drop step): the tally notes a segment from the outcomes that a node keeps above its
+  record, and `released_part` keeps a segment that a `Truncate` released only in part. In the
+  code, `HeldTally::judge` marks a released segment once its end is published, with no report,
+  and `ColocatedNode::judge_released` judges the released segments after each walk, since a
+  `Truncate` releases a segment with no report or publish after it. **Open**
+  (step 6): the tally notes a segment from the outcomes that a node keeps above its
   floor, so a leader whose floor passed a `Roll` (a restart, or a trim-point jump) forgets a
   segment that another leader held. The rule covers that segment only once it is released; the
-  model has one `held` set for every leader and does not show the case. **Open** (the drop step): the fold checks the end and the position of a `Hold`
+  model has one `held` set for every leader and does not show the case. **Open** (step 6): the fold checks the end and the position of a `Hold`
   against bounds, not against the exact values of its segment; the drop needs them exact (the
   oracle of consensus-sim checks them exact). The tally never forgets a sender that reported, and keeps a report
   from the seal, before the chain publishes the end. Its safety rests on a fault model that the
@@ -258,6 +272,21 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
 - **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
   an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
   whose records are all below the trim floor. Source: Delos `reconfigModify`.
+  **Decided** (Pierre, 2026-11-26): the heal has two halves. The core repairs the copies of the
+  set that is named: a replica that lost slots of its segment pulls them from a peer of the same
+  set (peer catch-up), and there is no choice to make. The journal controller (§4.8) changes the
+  set: a replacement is an order, as autoscaling is. No code comes before the models of the four
+  points below:
+  - **Open** (safety): the held tally never forgets a report (R7). Across a change of the set
+    it must count a report only from a member of the set in force, and a new member counts as
+    down until it holds the segment whole. Model first: a TLA+ pass and a control, with
+    `specs/tla/segment-reseat/` (D10) and a model of the heal of a sealed segment.
+  - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
+    the leader's fold does not see. The tally and the route must learn the new set from the
+    chain.
+  - **Open**: `ReplicaFeedback` (§4.8) carries no fact of a segment or of `Held`, so the
+    controller cannot see a sealed segment that lost a copy.
+  - **Open**: who proposes the `Decree` of the heal of a sealed segment.
 - **R9. The grid does not change here.** A grid change is `ColocatedNode::reconfigure`, a round
   change, as today. It cuts no segment. What the removed journal called a reshape is two calls:
   `reconfigure(config)` and `roll(Some(replicas))` (D4).

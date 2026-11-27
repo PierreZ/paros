@@ -149,8 +149,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   acceptor configuration, D8) and its end is in the chain. The decided `Hold` (D9) is built
   too: the leader proposes a `Command::Hold` for each segment its tally marks, in order, and the
   fold accepts one only for the segment right after the held prefix (`JournalState::held`).
-  A retry of a write inside the held prefix is then `Outcome::Held`. The drop of a held segment
-  at the acceptors comes next.
+  A retry of a write inside the held prefix is then `Outcome::Held`. The drop is built: the
+  replica of a `ColocatedNode` drops held records (`replica::HeldRecords::Drop`), so its floor
+  rises to the end of the held prefix when the fold applies the `Hold`
+  (`Replica::compaction_target`), and a `ReplicaNode` keeps them (`Keep`). A segment whose
+  writes all lie below `first_seq` counts as held with no report (Pierre, 2026-11-26;
+  `specs/tla/held-floor-released/`, `ColocatedNode::judge_released`).
 
 ## 10. Pitfalls
 

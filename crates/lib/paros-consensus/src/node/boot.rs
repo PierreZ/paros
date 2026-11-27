@@ -19,6 +19,7 @@ use crate::matchmaking::retire_check::RejoinCheck;
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::publisher::Publisher;
 use crate::quorum_read::QuorumReads;
+use crate::replica::HeldRecords;
 
 impl ColocatedNode {
     /// Construct from a read-only [`Storage`] by reading durable state back in.
@@ -95,6 +96,10 @@ impl ColocatedNode {
             &accepted,
         );
         replica.set_apply_page(limits.apply_page);
+        // The node's learner keeps the whole log, and the replicas of a held
+        // segment hold it whole: its records go at the fold of the `Hold`.
+        // The plain arm never folds a `Hold`, so this changes nothing there.
+        replica.set_held_records(HeldRecords::Drop);
 
         // Next free slot: one past the highest accepted entry (readable or
         // faulty), or (when the log is empty, e.g. fully truncated) one past

@@ -717,3 +717,145 @@ fn a_replica_that_holds_a_slot_does_not_unbind() {
     r.bind_segment();
     r.replica.unbind_segment();
 }
+
+/// The commands of a journal whose first segment (slots 0 to 3, positions 0
+/// and 1) is held at slot 4, with a retry of position 0 at slot 5 (answered
+/// `Held`) and a retry of position 2 at slot 7 (a duplicate).
+fn held_first_segment() -> [Command; 8] {
+    use crate::journal::{Hold, Roll, SegmentId};
+    [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        Command::Roll(Roll {
+            next: SegmentId(1),
+            replicas: None,
+        }),
+        Command::Hold(Hold {
+            segment: SegmentId::FIRST,
+            end: Slot(4),
+            next_seq: Seq(2),
+        }),
+        write(0, &[b"a"]), // a retry inside the held prefix
+        write(2, &[b"c"]),
+        write(2, &[b"c"]), // a retry past it
+    ]
+}
+
+/// A replica that drops held records may go to the end of the held prefix:
+/// a retry answered `Held` reads no record, so it holds no floor down, and
+/// a duplicate past the prefix keeps the record it reads. A replica that
+/// keeps held records drops nothing that no `Truncate` released.
+#[test]
+fn a_replica_that_drops_held_records_goes_to_the_end_of_the_held_prefix() {
+    use super::HeldRecords;
+    let commands = held_first_segment();
+    let keep = replica(&commands);
+    assert!(matches!(keep.outcome_at(Slot(5)), Some(Outcome::Held(_))));
+    assert!(matches!(
+        keep.outcome_at(Slot(7)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    // Keep: the first record, position 0, sits at slot 1.
+    assert_eq!(keep.compaction_target(), Some(Slot(0)));
+    let mut drop = replica(&commands);
+    drop.set_held_records(HeldRecords::Drop);
+    // Drop: the end of the held prefix, slot 4; the retry at slot 5 does
+    // not pull it down, and the retry at slot 7 reads slot 6.
+    assert_eq!(drop.compaction_target(), Some(Slot(3)));
+    let sealed = drop.truncate(Slot(4));
+    assert_eq!(
+        sealed.held, None,
+        "the seal at the end precedes the Hold, which the refold applies again"
+    );
+    // A refold from the floor answers each retry as before.
+    let mut recs = records(&commands);
+    recs.retain(|slot, _| *slot >= Slot(4));
+    let rebooted = Held::boot(WriterMode::Single, Some(Slot(7)), Slot(4), sealed, &recs);
+    assert!(matches!(
+        rebooted.outcome_at(Slot(5)),
+        Some(Outcome::Held(_))
+    ));
+    assert!(matches!(
+        rebooted.outcome_at(Slot(7)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    assert_eq!(rebooted.journal(), drop.journal());
+    assert_eq!(
+        drop.read(Seq(0), 8, 64),
+        LogRead::NotHeld,
+        "the replicas of the segment hold it"
+    );
+}
+
+/// A bound replica keeps the segment it is bound to.
+#[test]
+#[should_panic(expected = "a bound replica keeps the segment it is bound to")]
+fn a_bound_replica_that_drops_held_records_is_a_bug() {
+    let mut r = replica(&[claim()]);
+    r.bind_segment();
+    r.set_held_records(super::HeldRecords::Drop);
+}
+
+/// A replica set to drop held records is never bound.
+#[test]
+#[should_panic(expected = "a replica that drops held records is never bound")]
+fn binding_a_replica_that_drops_held_records_is_a_bug() {
+    let mut r = replica(&[claim()]);
+    r.set_held_records(super::HeldRecords::Drop);
+    r.bind_segment();
+}
+
+/// A `Truncate` past the held prefix lifts the floor past its end: the
+/// held end is a lower bound of the floor, never its value.
+#[test]
+fn a_truncate_past_the_held_prefix_lifts_the_floor_past_its_end() {
+    use super::HeldRecords;
+    let mut commands = held_first_segment().to_vec();
+    commands.push(write(3, &[b"d"])); // slot 8
+    commands.push(truncate_to(3, 1)); // slot 9
+    let mut drop = replica(&commands);
+    drop.set_held_records(HeldRecords::Drop);
+    assert_eq!(drop.journal().first_seq, Seq(3));
+    // The first record, position 3, sits at slot 8: the retry at slot 7
+    // reads a released record, so it holds nothing down.
+    assert_eq!(drop.compaction_target(), Some(Slot(7)));
+    let keep = replica(&commands);
+    assert_eq!(keep.compaction_target(), Some(Slot(7)));
+}
+
+/// A retry chosen before the `Hold` folds as a duplicate, and reads the
+/// record of its write below the end: the floor stays below that record.
+#[test]
+fn a_retry_folded_before_the_hold_keeps_its_record_below_the_end() {
+    use super::HeldRecords;
+    use crate::journal::{Hold, Roll, SegmentId};
+    let commands = [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        Command::Roll(Roll {
+            next: SegmentId(1),
+            replicas: None,
+        }),
+        write(0, &[b"a"]), // slot 4: a duplicate that reads slot 1
+        Command::Hold(Hold {
+            segment: SegmentId::FIRST,
+            end: Slot(4),
+            next_seq: Seq(2),
+        }),
+        write(2, &[b"c"]),
+    ];
+    let mut drop = replica(&commands);
+    drop.set_held_records(HeldRecords::Drop);
+    assert!(matches!(
+        drop.outcome_at(Slot(4)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    assert_eq!(drop.journal().held.map(|h| h.end), Some(Slot(4)));
+    assert_eq!(
+        drop.compaction_target(),
+        Some(Slot(0)),
+        "the duplicate at slot 4 keeps slot 1"
+    );
+}

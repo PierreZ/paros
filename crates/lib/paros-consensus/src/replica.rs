@@ -104,7 +104,10 @@ pub enum LogRead {
     /// replica whose floor rose before its fold reached the truncation that
     /// let it rise answers this — one that jumped to a peer's trim point
     /// ([`Replica::trim_to`]) or rebooted onto a fold stopped at a hole —
-    /// typically only until its fold catches up. The reader asks elsewhere: the
+    /// typically only until its fold catches up, and a replica that drops
+    /// held records ([`HeldRecords::Drop`]) for every position below the
+    /// held prefix's, for good: the replicas of the held segment keep
+    /// those records. The reader asks elsewhere: the
     /// driver answers it unserved, never `Truncated` (the journal still has
     /// the record) and never a page (this replica cannot produce it).
     NotHeld,
@@ -155,6 +158,22 @@ impl LogPage {
         assert!(next >= self.from, "a page never ends before it starts");
         next
     }
+}
+
+/// Whether a replica drops the records of a held segment (R7 of
+/// `docs/architecture/04-7-segments.md` §4.7). The deployment chooses: an
+/// acceptor's learner drops them, since the replicas of the segment hold it
+/// whole; a [`crate::replica_node::ReplicaNode`] keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HeldRecords {
+    /// Keep every record that no `Truncate` released.
+    #[default]
+    Keep,
+    /// Drop the records below the end of the held prefix too, at the fold
+    /// of the `Hold` that extends it (`HoldDrop = "keep"` of
+    /// `specs/tla/held-floor/`: the fixed point of the retries above the
+    /// end still holds).
+    Drop,
 }
 
 /// The replica: chosen log, applied prefix, journal fold. See the module doc.
@@ -214,6 +233,9 @@ pub struct Replica {
     /// keeps the whole log (a node's). A bound fold stops after the `Roll`
     /// that ends the segment ([`Replica::is_sealed`]).
     bound: Option<SegmentId>,
+    /// Whether the records of a held segment go with a compaction
+    /// ([`Replica::set_held_records`]).
+    held_records: HeldRecords,
 }
 
 impl Replica {
@@ -271,6 +293,7 @@ impl Replica {
             mode,
             apply_page: APPLY_BATCH,
             bound: None,
+            held_records: HeldRecords::Keep,
         };
         replica.refold(records);
         replica.truncate_due = false;
@@ -833,6 +856,11 @@ impl Replica {
     #[must_use]
     pub fn compaction_target<L: ChosenLog + ?Sized>(&self, log: &L) -> Option<Slot> {
         let mut first = self.slot_holding(log, self.state.first_seq);
+        // The replicas of a held segment hold it whole (R7): a replica that
+        // drops held records may go to the end of the held prefix.
+        if let Some(end) = self.held_end() {
+            first = first.max(end);
+        }
         // A sealed replica keeps the `Roll` that ends its segment (R6): its
         // base, the state at its floor, stays in the segment it keeps.
         if let Some(end) = self.sealed_end() {
@@ -903,9 +931,12 @@ impl Replica {
                     // folded (accepted, or refused ahead) is held at its own
                     // slot or above (`slot_holding`), never below `first`:
                     // only a retry below that position can pull the floor.
+                    // A retry answered `Held` reads no record either: the
+                    // fold answers it before the log is asked.
                     let entry = chosen_command(log, *slot).1.write()?;
                     let at = self.state_at(*slot);
-                    (entry.seq >= at.first_seq).then(|| self.slot_holding(log, entry.seq))
+                    (entry.seq >= at.first_seq && !self.folded_held(*slot, entry))
+                        .then(|| self.slot_holding(log, entry.seq))
                 })
                 .min()
                 .unwrap_or(first);
@@ -982,15 +1013,13 @@ impl Replica {
     /// A `from` at or past `first_seq` but below the base's `next_seq` is
     /// [`LogRead::NotHeld`]: every record the base counts sits in a slot
     /// below the floor, dropped here. A floor this replica's own truncation
-    /// set keeps the slot holding `first_seq`, so this meets only a floor
-    /// that rose ahead of the fold: a trim-point jump adopts the peer's base
-    /// at its floor while the decided `Truncate` that let the peer's floor
-    /// rise sits in a slot above it this fold has not reached yet (or a
-    /// reboot's refold stopped at a hole below that slot). Serving such a
-    /// read used to panic looking for the record in the positions index;
-    /// red→green: main-hunt seed 2382785388621081873 (a node jumped to trim
-    /// point 5 with base `first_seq` 0, `next_seq` 1, missed the truncation
-    /// at slot 19, and a quorum read from 0 confirmed at its fold head).
+    /// set keeps the slot holding `first_seq`, so this meets a floor that
+    /// rose ahead of the fold (a trim-point jump adopts the peer's base at
+    /// its floor while the decided `Truncate` that let the peer's floor rise
+    /// sits in a slot above it this fold has not reached yet, or a reboot's
+    /// refold stopped at a hole below that slot), and the floor of a replica
+    /// that drops held records, at the end of the held prefix: the replicas
+    /// of the held segment serve those positions.
     ///
     /// # Panics
     ///
@@ -1076,6 +1105,53 @@ impl Replica {
         LogRead::Page(page)
     }
 
+    /// Set the policy for the records of a held segment
+    /// ([`HeldRecords`]): the deployment chooses once, after the boot.
+    ///
+    /// # Panics
+    ///
+    /// If a replica bound to a segment is asked to drop held records: it
+    /// keeps the segment it is bound to.
+    pub fn set_held_records(&mut self, policy: HeldRecords) {
+        assert!(
+            policy == HeldRecords::Keep || self.bound.is_none(),
+            "a bound replica keeps the segment it is bound to"
+        );
+        self.held_records = policy;
+    }
+
+    /// The first slot that the held prefix lets this replica drop below:
+    /// the end of the held prefix when it drops held records, else none.
+    fn held_end(&self) -> Option<Slot> {
+        if self.held_records == HeldRecords::Keep {
+            return None;
+        }
+        let end = self.state.held.map(|hold| hold.end)?;
+        assert!(end <= self.folded, "the held prefix ends inside the fold");
+        assert!(end.0 > 0, "a held segment ends past its `Roll`");
+        Some(end)
+    }
+
+    /// Whether the write `entry`, folded at `slot`, was answered `Held`, as
+    /// the fold recorded it ([`Replica::outcome_at`]). Such a retry reads no
+    /// record, so it holds no floor down.
+    fn folded_held(&self, slot: Slot, entry: &Entry) -> bool {
+        let held = matches!(self.outcome_at(slot), Some(Outcome::Held(_)));
+        // Paired with the rule of `JournalState::apply`, which wrote the
+        // outcome: a `Held` retry lies below the position of the held
+        // prefix in the state it was judged against.
+        let at = self.state_at(slot);
+        assert!(
+            !held || at.held.is_some_and(|hold| entry.seq < hold.next_seq),
+            "a retry answered held lies inside the held prefix"
+        );
+        assert!(
+            !held || self.mode == WriterMode::Single,
+            "only a single-writer retry is answered held"
+        );
+        held
+    }
+
     /// Set the apply page size (#338): the most slots one walk
     /// ([`Replica::advance`]) releases before it leaves a deferred
     /// continuation. A per-node size, never on the wire. A small page makes
@@ -1125,8 +1201,13 @@ impl Replica {
     /// # Panics
     ///
     /// If the fold passed more than one `Roll` since its base: a bound fold
-    /// never walks past the end of its segment.
+    /// never walks past the end of its segment. If the replica drops held
+    /// records: a bound replica keeps its segment.
     pub fn bind_segment(&mut self) {
+        assert!(
+            self.held_records == HeldRecords::Keep,
+            "a replica that drops held records is never bound"
+        );
         let kept = self.base.segment.id;
         assert!(
             self.state.segment.id == kept || self.state.segment.id == kept.successor(),
@@ -1273,7 +1354,11 @@ impl Replica {
             );
             self.positions.insert(*seq, slot);
         }
-        if matches!(outcome, Outcome::Trimmed(_)) {
+        // A `Truncate` releases records, and a `Hold` lets a replica that
+        // drops held records go to the end of the held prefix.
+        if matches!(outcome, Outcome::Trimmed(_))
+            || (matches!(outcome, Outcome::HeldTo(_)) && self.held_records == HeldRecords::Drop)
+        {
             self.truncate_due = true;
         }
         if self.state != before {
@@ -1460,7 +1545,7 @@ impl Replica {
                 // A write at or past the journal's position when it folded
                 // reads no earlier record, and its own record is retained.
                 let at = self.state_at(*slot);
-                if entry.seq < at.first_seq {
+                if entry.seq < at.first_seq || self.folded_held(*slot, entry) {
                     continue;
                 }
                 assert!(
@@ -1501,9 +1586,17 @@ impl Replica {
         let base = self.state_at(first);
         // Checked apart from `compaction_target` (#269): every record the
         // dropped prefix accepted lies below the journal's first position.
+        // A replica that drops held records drops records below the held
+        // position too: the replicas of the held segment keep them.
+        let kept_elsewhere = self
+            .held_end()
+            .and(self.state.held)
+            .map_or(self.state.first_seq, |hold| {
+                hold.next_seq.max(self.state.first_seq)
+            });
         assert!(
-            base.next_seq <= self.state.first_seq,
-            "a truncation drops no record at or past first_seq"
+            base.next_seq <= kept_elsewhere,
+            "a truncation drops no record at or past first_seq, or the held prefix"
         );
         let chosen_index = self.chosen_index;
         self.drop_prefix(first, base.clone());

@@ -233,7 +233,7 @@ Test only: `publish = false`, never a dependency of another crate.
   `Mutant::RouteFromTail`: a leader's driver routes each `Commit` to the replicas of the tail
   segment of the leader's fold, caught by `ROUTE_TRUE`;
   `Mutant::RouteOnDecision`: a leader's driver routes the `Commit` of a slot above its fold to the
-  replicas of its tail segment at the decision, caught by `ROUTE_ON_PREFIX`;
+  replicas of its tail segment at the decision, never past a `Roll` it holds above its fold (one bug), caught by `ROUTE_ON_PREFIX`;
   `Mutant::CorruptTrimSegment`: a trim jump
   that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one

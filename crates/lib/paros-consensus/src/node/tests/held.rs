@@ -21,6 +21,8 @@ fn held(from: u64, segment: u64, end: Slot) -> Message {
 #[test]
 fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published() {
     let (mut nodes, mut mms, _) = rolled(Some(ReplicaSet::new([NodeId(3), NodeId(4)])));
+    // One write in segment 1, so that no `Truncate` has released it.
+    own_and_write(&mut nodes, &mut Vec::new());
     // The second `Roll` names other replicas, for segment 2: the replicas
     // of segment 1 are the ones its own `Roll` named.
     let RollResult::Accepted { slot, .. } =
@@ -66,12 +68,21 @@ fn a_segment_is_held_once_f_plus_one_replicas_report_it_and_its_end_is_published
     for ack in publish(&mut mms, &requests) {
         let _ = nodes[1].on_segment_ack(&ack);
     }
+    // The first segment holds no write, so it is released once its end is
+    // in the chain: this follower's own publish completed.
     nodes[1].step(held(3, 1, end));
-    assert_eq!(nodes[1].held_segments().count(), 0);
+    assert_eq!(
+        nodes[1].held_segments().collect::<Vec<_>>(),
+        [SegmentId::FIRST]
+    );
     nodes[1].step(held(4, 1, end));
-    assert_eq!(nodes[1].held_segments().collect::<Vec<_>>(), [SegmentId(1)]);
-    // The first segment names no replicas, so it is never held, and the
-    // held segments of the log are a prefix: no `Hold` is proposed.
+    assert_eq!(
+        nodes[1].held_segments().collect::<Vec<_>>(),
+        [SegmentId::FIRST, SegmentId(1)]
+    );
+    // The leader's publish of the first segment's end has not completed,
+    // so it does not hold that segment, and the held segments of the log
+    // are a prefix: no `Hold` is proposed.
     for _ in 0..3 {
         for i in 0..nodes.len() {
             let q = drain(&mut nodes[i]);
@@ -96,12 +107,15 @@ fn the_first_segment_is_held_by_the_replicas_of_the_configuration() {
     let q = super::route::matchmade(&mut nodes, 0, &mut mms);
     deliver_all(&mut nodes, q);
     assert!(nodes[0].is_leader());
+    // One write in the first segment, so that no `Truncate` has released
+    // it: only its replicas make it held.
+    let mut routed = Vec::new();
+    own_and_write(&mut nodes, &mut routed);
     let RollResult::Accepted { slot, .. } = nodes[0].roll(None) else {
         panic!("the leader admits a roll");
     };
     // The leader routes the slots of the first segment to its replicas,
     // which are not nodes of this test.
-    let mut routed = Vec::new();
     for _ in 0..3 {
         for i in 0..nodes.len() {
             let q = super::route::drain_routed(&mut nodes[i], &mut routed);
@@ -131,7 +145,7 @@ fn the_first_segment_is_held_by_the_replicas_of_the_configuration() {
     let hold = Hold {
         segment: SegmentId::FIRST,
         end,
-        next_seq: Seq(0),
+        next_seq: Seq(1),
     };
     let proposed: Vec<_> = nodes[0]
         .proposer
@@ -164,7 +178,40 @@ fn the_first_segment_is_held_by_the_replicas_of_the_configuration() {
             node.replica().outcome_at(proposed[0]),
             Some(&Outcome::HeldTo(hold))
         );
+        // The acceptors drop the held segment at the fold of its `Hold`:
+        // its replicas hold it whole, and no retry above the end reads it.
+        assert_eq!(node.acceptor().first_slot(), end, "the drop to the end");
+        assert_eq!(
+            node.replica().journal().first_seq,
+            Seq(0),
+            "nothing truncated"
+        );
     }
+}
+
+/// Claim the journal for leader uuid 1 and write one record at position 0,
+/// decided on every node.
+fn own_and_write(nodes: &mut [ColocatedNode], routed: &mut Vec<super::route::Routed>) {
+    let _ = nodes[0].propose_control(Control::SetLeader {
+        new: LeaderUuid(1),
+        old: None,
+    });
+    let _ = nodes[0].propose(Entry {
+        leader: LeaderUuid(1),
+        seq: Seq(0),
+        records: vec![val(1)],
+    });
+    for _ in 0..3 {
+        for i in 0..nodes.len() {
+            let q = super::route::drain_routed(&mut nodes[i], routed);
+            routed.extend(super::route::deliver_routed(nodes, q));
+        }
+    }
+    assert_eq!(
+        nodes[0].replica().journal().next_seq,
+        Seq(1),
+        "the write is accepted"
+    );
 }
 
 /// A follower whose tally marks a segment proposes nothing: only the

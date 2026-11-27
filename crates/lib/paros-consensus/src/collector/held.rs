@@ -9,7 +9,12 @@
 //! `F` of its replicas reported it ([`AcceptorConfig::is_held_by`], D8) and
 //! its end is in the chain (the control `held_log` of
 //! `specs/tla/held-floor/`: a floor past an end that the chain does not
-//! publish). `Held` only grows, and a report counts forever: a replica that
+//! publish). A segment whose writes all lie below `first_seq` is `Held` too,
+//! with no report: a `Truncate` released its records, so no replica need
+//! keep them, and a segment with no replicas does not stop the held prefix
+//! (`Skip = "released"` of `specs/tla/held-floor-released/`, decided by
+//! Pierre on 2026-11-26; its control `norep` loses a record). `Held` only
+//! grows, and a report counts forever: a replica that
 //! reported a segment held it durably, and at most `F` replicas are down at
 //! one time, a replica being down from a lost disk until it copies the
 //! segment again (`held_ever` of `specs/tla/held-floor-retry/`, `MarkHeld` of
@@ -38,7 +43,7 @@ pub struct SealedSegment {
     pub next_seq: Seq,
     /// The replicas that keep it: the set the fold gives at its `Roll`,
     /// else the deployment's `Config::segment_replicas`. `None` when
-    /// neither names one: such a segment is never held.
+    /// neither names one: such a segment is held only once released.
     pub replicas: Option<ReplicaSet>,
 }
 
@@ -133,25 +138,48 @@ impl HeldTally {
         true
     }
 
-    /// Mark `segment` `Held` when it is noted, more than `F` of its
-    /// replicas reported it and `published` says that its end is in the
-    /// chain. Returns
-    /// whether this call marked it.
+    /// Mark `segment` `Held` when it is noted, `published` says that its
+    /// end is in the chain, and either more than `F` of its replicas
+    /// reported it or every write of it lies below `first_seq` (it is
+    /// released). Returns whether this call marked it.
     ///
     /// # Panics
     ///
     /// If a held segment loses its mark: a programmer error.
-    pub fn judge(&mut self, segment: SegmentId, config: &AcceptorConfig, published: bool) -> bool {
+    pub fn judge(
+        &mut self,
+        segment: SegmentId,
+        config: &AcceptorConfig,
+        published: bool,
+        first_seq: Seq,
+    ) -> bool {
         if self.held.contains(&segment) || !published {
             return false;
         }
-        let Some(replicas) = self.sealed.get(&segment).and_then(|f| f.replicas.as_ref()) else {
+        let Some(fold) = self.sealed.get(&segment) else {
             return false;
         };
-        let copies = self.reports.get(&segment).map_or(0, |reporters| {
-            reporters.iter().filter(|r| replicas.contains(**r)).count()
+        // Released: every write of the segment lies below `first_seq`. The
+        // model also releases a segment with no write as soon as it ends
+        // (`SegReleased` of `specs/tla/held-floor-released/`); this rule
+        // releases it once `first_seq` reaches its position, never earlier,
+        // so it holds no more than the model does. It loses no progress: a
+        // `Roll` never sets the replicas back to none, so the segments with
+        // no replicas are a prefix, and an empty one among them has the
+        // position of the segment before it, which needs the same release.
+        let released = fold.next_seq <= first_seq;
+        let copies = fold.replicas.as_ref().map_or(0, |replicas| {
+            self.reports.get(&segment).map_or(0, |reporters| {
+                reporters.iter().filter(|r| replicas.contains(**r)).count()
+            })
         });
-        if !config.is_held_by(copies) {
+        // Paired with `report`, which counts no report of a segment with no
+        // replicas.
+        assert!(
+            fold.replicas.is_some() || !self.reports.contains_key(&segment),
+            "a segment with no replicas has no report"
+        );
+        if !released && (fold.replicas.is_none() || !config.is_held_by(copies)) {
             return false;
         }
         self.held.insert(segment);
@@ -163,6 +191,23 @@ impl HeldTally {
             "a held segment keeps no report"
         );
         true
+    }
+
+    /// The noted segments that are not held yet and that `first_seq`
+    /// released: each write of them lies below it.
+    ///
+    /// # Panics
+    ///
+    /// If a held segment is not noted: a programmer error.
+    pub fn released(&self, first_seq: Seq) -> impl Iterator<Item = SegmentId> + '_ {
+        assert!(
+            self.held.iter().all(|k| self.sealed.contains_key(k)),
+            "every held segment is noted"
+        );
+        self.sealed
+            .iter()
+            .filter(move |(k, fold)| !self.held.contains(k) && fold.next_seq <= first_seq)
+            .map(|(k, _)| *k)
     }
 
     /// Whether `segment` is marked `Held`.
@@ -189,7 +234,7 @@ impl HeldTally {
     ///
     /// # Panics
     ///
-    /// If a held segment is not noted, or names no replicas: a programmer
+    /// If a held segment is not noted, or keeps its reports: a programmer
     /// error.
     pub fn held(&self) -> impl Iterator<Item = SegmentId> + '_ {
         assert!(
@@ -197,10 +242,8 @@ impl HeldTally {
             "every held segment is noted"
         );
         assert!(
-            self.held
-                .iter()
-                .all(|k| self.sealed.get(k).is_some_and(|f| f.replicas.is_some())),
-            "every held segment names its replicas"
+            self.held.iter().all(|k| !self.reports.contains_key(k)),
+            "a held segment keeps no report"
         );
         self.held.iter().copied()
     }
