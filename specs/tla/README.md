@@ -2948,8 +2948,8 @@ What is not in the model: a third configuration, the restart and the faulty reco
 
 ### `held-reseat/`: the held tally across a change of the replica set of a segment, for step 6 of the segments in the core
 
-The safety Open of R8 of `docs/architecture/04-7-segments.md`; the rule here is proposed, not
-decided. A segment is `Held` once `F + 1` of its replicas reported it whole, and then the
+R8 of `docs/architecture/04-7-segments.md`; Pierre adopted the rule on 2026-11-27, and it is
+not built yet. A segment is `Held` once `F + 1` of its replicas reported it whole, and then the
 acceptors drop it (R7). The set of a segment changes by a `SetReplicas` of the open segment at
 slot `SetAt` (D10: each `Commit` above it goes to the new set), or by a heal of the sealed
 segment, a `Decree` at the matchmakers that replaces `HealOut` by `HealIn` and that the fold does

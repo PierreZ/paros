@@ -316,9 +316,10 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   set (peer catch-up), and there is no choice to make. The journal controller (§4.8) changes the
   set: a replacement is an order, as autoscaling is. No code comes before the models of the four
   points below:
-  - **Open** (safety; a rule is proposed and modelled, not decided and not built): the held
-    tally across a change of the set, by a `SetReplicas` of the open segment (D10) or a heal of
-    a sealed one. `specs/tla/held-reseat/` checks the proposed rule: each change of the set is a
+  - **Decided** (Pierre, 2026-11-27, on the decision card "Adopt the versioned held tally for
+    replica set changes?"; not built): the held tally across a change of the set, by a
+    `SetReplicas` of the open segment (D10) or a heal of a sealed one, is versioned.
+    `specs/tla/held-reseat/` checks the rule: each change of the set is a
     new version; the tally stamps a report with the version that it knows and counts it only
     at that version, and only from a member of the set in force; a replica reports only once it
     holds the segment whole, so a new member counts as down until then; the held mark names the
@@ -333,7 +334,10 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
     copy and came back counts with its old report); each loses a slot. The tally of the code
     (`collector/held.rs`) must change two ways for it: its reports are kept by segment and
     version, and a held segment takes reports again after a change of its set (today `judge`
-    deletes the reports at `Held` and `report` refuses a held segment). The routing of
+    deletes the reports at `Held` and `report` refuses a held segment). My reading of the
+    order of work: that change comes with the first code that changes a set (`SetReplicas`,
+    step 5d), since before it the version of every segment is 0. The fault rule above is still
+    a reading, not decided. The routing of
     `SetReplicas` and the join of a new replica are `segment-reseat/` (D10).
   - **Open** (liveness): the heal of a sealed segment is a `Decree` at the matchmakers, which
     the leader's fold does not see. The tally and the route must learn the new set from the
