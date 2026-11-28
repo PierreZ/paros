@@ -25,7 +25,8 @@ pub enum SetReplicasResult {
     NotLeader(Option<NodeId>),
     /// The `SetReplicas` of `segment` is admitted at `slot`. It takes
     /// effect when the fold of the chosen prefix reaches the slot and finds
-    /// it valid (the slot's outcome is `Reseated` or `ReseatIgnored`).
+    /// it valid (the slot's outcome is `Reseated`, else `ReseatIgnored` or
+    /// `ReseatRemoved`).
     Accepted {
         /// The slot of the `SetReplicas`.
         slot: Slot,

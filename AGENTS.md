@@ -100,7 +100,7 @@ model of `truncation-reconfig/`: a reconfiguration onto an empty member after th
 `specs/tla/held-floor-trimmed/`: a lagging replica of a released segment stops as trimmed; a
 lagging replica of a held segment copies it from a peer, `CanCopy` of `held-floor/` for safety and
 `specs/tla/peer-pull/` for liveness: the pull turns over the replica peers only; the held tally
-across a change of the replica set, `specs/tla/held-reseat/`, a rule that Pierre adopted on 2026-11-27, of which the count of the set in force is built (step 5d) and the version stamp comes with the heal; the route, the join and the removed member across a `SetReplicas`, `specs/tla/segment-reseat/`, built in step 5d; and a proposed rule, modelled and not built: the heal of a sealed segment learned from the chain, `specs/tla/heal-learn/`), and the boundaries of
+across a change of the replica set, `specs/tla/held-reseat/`, a rule that Pierre adopted on 2026-11-27, of which the count of the set in force is built (step 5d) and the version stamp comes with the heal; the route, the join and the removed member across a `SetReplicas`, `specs/tla/segment-reseat/`, built in step 5d, and several of them in one segment with the refusal of a removed member, `specs/tla/reseat-many/`, built in step 5d; and a proposed rule, modelled and not built: the heal of a sealed segment learned from the chain, `specs/tla/heal-learn/`), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag

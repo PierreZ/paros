@@ -132,8 +132,10 @@ pub enum LogRead {
     /// ([`Replica::set_member`]) answers this; the control `no_moved` of
     /// `specs/tla/segment-reseat/` leaves such a read waiting for ever.
     Moved {
-        /// The journal's next position after the `SetReplicas` (it takes
-        /// no position).
+        /// The journal's next position at the head of the fold: after the
+        /// `SetReplicas` (it takes no position), or at the point of a trim
+        /// jump that carried the replica past it. A position below it that
+        /// the replica does not hold is answered "not here".
         end: Seq,
         /// The replicas of the segment that the `SetReplicas` named.
         replicas: ReplicaSet,

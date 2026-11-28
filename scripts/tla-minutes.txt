@@ -46,6 +46,7 @@ proxy-leader 2
 read-replica 1
 reads 22
 reads-rows4 9
+reseat-many 3.1
 retire-fence 18
 segment-reseat 1.7
 segment-roll 7.5

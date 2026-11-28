@@ -126,8 +126,11 @@ pub struct Hold {
 /// one.
 ///
 /// Judged at apply in slot order: it is valid when `segment` is the tail
-/// segment, and a valid one gives the tail its `replicas`
-/// ([`crate::journal::JournalState::replicas`]). Any other changes nothing.
+/// segment and `replicas` names no member that an earlier `SetReplicas` of
+/// the tail removed ([`crate::journal::JournalState::removed`]). A valid one
+/// gives the tail its `replicas` ([`crate::journal::JournalState::replicas`])
+/// and removes the members of the set before it that it leaves out. Any
+/// other changes nothing.
 /// A leader routes the `Commit` of each slot to the set that its fold gives
 /// at that slot, so the slot of the `SetReplicas` goes to the old set and
 /// every later slot to the new one (`Route = "fold"` of

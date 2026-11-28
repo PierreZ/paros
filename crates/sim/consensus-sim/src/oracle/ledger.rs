@@ -58,6 +58,9 @@
 //!     trimmed only once the chosen prefix seals the segment and its
 //!     `first_seq` reaches the next position at the seal. (Oracles 10 and
 //!     11 are those of goal 2, in `healed.rs`.)
+//! 13. **A move is true** ([`MOVED_TRUE`]): a replica of a segment stops as
+//!     moved at slot `end` only once the chosen log below `end` holds a
+//!     valid `SetReplicas` of that segment that removed it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,6 +98,10 @@ pub const ROUTE_ON_PREFIX: &str =
 /// `docs/architecture/04-7-segments.md`, `TrimmedReleased` of
 /// `specs/tla/held-floor-trimmed/`).
 pub const TRIM_TRUE: &str = "a replica stops as trimmed only on a segment the chosen log released";
+/// Oracle 13: a replica stops as moved only past a valid `SetReplicas` of
+/// its segment that removed it (D10 of `docs/architecture/04-7-segments.md`,
+/// `Out` of `specs/tla/segment-reseat/`).
+pub const MOVED_TRUE: &str = "a replica stops as moved only past a SetReplicas that removed it";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -395,6 +402,38 @@ impl Ledger {
             expected.0 == segment && expected.1.as_ref() == Some(replicas),
             "{ROUTE_TRUE}: {who} routed slot {} to {replicas:?} of segment {}, and the chosen log gives {expected:?}",
             slot.0,
+            segment.0,
+        );
+    }
+
+    /// Oracle 13: `member`, a replica of `segment`, stopped as moved at
+    /// `end`, the first slot that is not its own. Every slot below `end` is
+    /// chosen (the replica walked or jumped there), and after slot
+    /// `end - 1` the spec's tail must be `segment` with `member` removed.
+    ///
+    /// # Panics
+    ///
+    /// If the chosen log below `end` removed `member` from no `SetReplicas`
+    /// of `segment`.
+    pub fn moved_holds(&mut self, member: NodeId, segment: SegmentId, end: Slot) {
+        let last = end.0.checked_sub(1).map(Slot);
+        let after = last.and_then(|last| {
+            let (chosen, commands) = (&self.chosen, &self.commands);
+            let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+            (0..=last.0)
+                .all(|s| chosen.contains_key(&Slot(s)))
+                .then(|| {
+                    let _ = self.journal.judge(last, lookup);
+                    self.journal.removed_after(last).cloned()
+                })?
+        });
+        assert!(
+            after
+                .as_ref()
+                .is_some_and(|(tail, removed)| *tail == segment.0 && removed.contains(&member)),
+            "{MOVED_TRUE}: replica {} stopped as moved at slot {} of segment {}, and the chosen log gives {after:?}",
+            member.0,
+            end.0,
             segment.0,
         );
     }

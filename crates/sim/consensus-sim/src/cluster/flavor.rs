@@ -658,6 +658,12 @@ pub enum Mutant {
     /// trimmed while the chosen log still keeps writes of its segment.
     /// Caught by [`TRIM_TRUE`](crate::oracle::ledger::TRIM_TRUE).
     ForgeTrimRelease,
+    /// The network makes a trim point that it delivers to a replica, inside
+    /// the segment the replica keeps, name the replica among the removed
+    /// members of its tail. The replica then stops as moved where no
+    /// `SetReplicas` removed it. Caught by
+    /// [`MOVED_TRUE`](crate::oracle::ledger::MOVED_TRUE).
+    ForgeMove,
     /// The driver drops every order of the journal controllers: the member
     /// that stopped for good stays in the configuration. Caught by
     /// [`HEALED`](crate::oracle::healed::HEALED) at the end of the settle

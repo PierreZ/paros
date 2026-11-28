@@ -867,6 +867,12 @@ fn a_set_replicas_removes_members_for_the_rest_of_the_segment() {
         ..state.clone()
     };
     assert!(!broken.is_well_formed());
+    let unset = JournalState {
+        removed: Some(nodes(&[9])),
+        replicas: None,
+        ..state.clone()
+    };
+    assert!(!unset.is_well_formed(), "removed members come with a set");
     assert!(state.is_well_formed());
 }
 

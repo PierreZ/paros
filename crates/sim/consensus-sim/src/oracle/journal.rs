@@ -89,6 +89,8 @@ pub struct JournalSpec {
     accepted: BTreeMap<u64, Entry>,
     /// Per folded slot: the view before it and the outcome it gets.
     folded: Vec<(JournalView, Outcome)>,
+    /// Per folded slot: the tail segment and the removed members after it.
+    removed_after: Vec<(u64, BTreeSet<NodeId>)>,
 }
 
 impl JournalSpec {
@@ -126,6 +128,8 @@ impl JournalSpec {
             let before = self.view();
             let outcome = self.step(at, command);
             self.folded.push((before, outcome));
+            self.removed_after
+                .push((self.segment, self.removed.clone()));
         }
         &self.folded[index]
     }
@@ -162,6 +166,15 @@ impl JournalSpec {
     #[must_use]
     pub fn first(&self) -> u64 {
         self.first
+    }
+
+    /// The tail segment and the members that a `SetReplicas` of it
+    /// removed, after `slot`, once the spec folded it.
+    #[must_use]
+    pub fn removed_after(&self, slot: Slot) -> Option<&(u64, BTreeSet<NodeId>)> {
+        usize::try_from(slot.0)
+            .ok()
+            .and_then(|k| self.removed_after.get(k))
     }
 
     /// How many slots the spec folded.

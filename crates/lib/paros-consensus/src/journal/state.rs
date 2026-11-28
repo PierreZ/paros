@@ -945,14 +945,16 @@ impl JournalState {
             && self.removed_apart()
     }
 
-    /// Whether no removed member is a replica of the tail
-    /// ([`JournalState::removed`]).
+    /// Whether no removed member is a replica of the tail, and a tail with
+    /// removed members has a set ([`JournalState::removed`]).
     fn removed_apart(&self) -> bool {
         match (&self.removed, &self.replicas) {
             (Some(removed), Some(replicas)) => {
                 removed.members().iter().all(|m| !replicas.contains(*m))
             }
-            _ => true,
+            // A `SetReplicas` that removed a member named the set after it.
+            (Some(_), None) => false,
+            (None, _) => true,
         }
     }
 

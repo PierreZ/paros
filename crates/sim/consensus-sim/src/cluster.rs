@@ -539,7 +539,9 @@ impl Model for Cluster {
                     return;
                 };
                 forge_release(mutant, &mut msg, replica);
+                forge_move(mutant, &mut msg, replica, id);
                 let trimmed = replica.is_trimmed();
+                let moved = replica.replica().is_moved();
                 replica.step(msg);
                 // Only a trim point turns a replica trimmed.
                 if replica.is_trimmed() && !trimmed {
@@ -551,6 +553,22 @@ impl Model for Cluster {
                         .trim_holds(&format!("replica {}", id.0), segment);
                 }
                 self.drain_replica(id, cx);
+                // A replica turns moved only at a step: a walk, a pull or a
+                // trim point that carries it past its removal.
+                if let Some(replica) = self.replica(id).live.as_ref()
+                    && replica.replica().is_moved()
+                    && !moved
+                {
+                    let segment = replica
+                        .replica()
+                        .segment_bound()
+                        .expect("a moved replica keeps a segment");
+                    let end = replica
+                        .replica()
+                        .ended_at()
+                        .expect("a moved replica has an end");
+                    self.ledger.moved_holds(id, segment, end);
+                }
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
             (Party::Matchmaker(id), Wire::Gc(request)) => self.gc_request(id, &request, cx),
@@ -2084,14 +2102,18 @@ impl Cluster {
 
     /// The operator replaces the first replica site of the first segment by
     /// the last one ([`LastSite::Added`](crate::cluster::flavor::LastSite::Added)), at a leader whose fold stands in
-    /// the first segment, or, half the time, names every site: before the
-    /// removal that only adds the last site, and after it the journal
-    /// refuses it, since it names the removed site again.
+    /// the first segment, or, half the time when the first site is awake,
+    /// names every site: before the removal that only adds the last site,
+    /// and after it the journal refuses it, since it names the removed site
+    /// again.
     fn set_replicas(&mut self, cx: &mut Cx<'_, Self>) {
         let Some(leader) = self.pick_leader(cx) else {
             return;
         };
-        let from = u64::from(cx.rng().chance(1, 2));
+        // A seed whose first site sleeps never adds the last site beside
+        // it: two of the four sites would be down in the set in force,
+        // more than the `F` = 1 down that the held rules allow (R7).
+        let from = u64::from(self.first_sleeps || cx.rng().chance(1, 2));
         let target =
             ReplicaSet::new((from..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)));
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
@@ -2682,6 +2704,38 @@ fn forge_release(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNod
     {
         state.segment = state.segment.rolled_at(state.segment.start);
         *first_seq = (*first_seq).max(state.next_seq);
+    }
+}
+
+/// [`Mutant::ForgeMove`]: a trim point inside the segment that `replica`
+/// keeps, shaped as a removal of the replica: its state names the replica
+/// among the removed members of the tail, and a set without it. The
+/// replica then stops as moved where no `SetReplicas` removed it.
+fn forge_move(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNode, me: NodeId) {
+    if let (Some(Mutant::ForgeMove), Message::TrimmedTo { point, state, .. }) = (mutant, msg)
+        && state.segment.start < *point
+        && replica.replica().segment_bound() == Some(state.segment.id)
+    {
+        let others: Vec<NodeId> = state
+            .replicas
+            .iter()
+            .flat_map(ReplicaSet::members)
+            .copied()
+            .filter(|n| *n != me)
+            .collect();
+        let others = if others.is_empty() {
+            vec![NodeId(me.0 + 1)]
+        } else {
+            others
+        };
+        let removed = state
+            .removed
+            .iter()
+            .flat_map(ReplicaSet::members)
+            .copied()
+            .chain([me]);
+        state.removed = Some(ReplicaSet::new(removed.collect::<BTreeSet<_>>()));
+        state.replicas = Some(ReplicaSet::new(others));
     }
 }
 
