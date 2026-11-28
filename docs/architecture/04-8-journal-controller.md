@@ -125,7 +125,7 @@ Steps 1 to 6 of #1564 (journal controller, version 1) built version 1. Each item
   the faults stop, one member of the configuration in force stops for good, and two controllers,
   one with a view 8 control rounds late, carry their orders through the driver. The driver of a
   node keeps each `Retire` that it carried and calls the node's `may_retire` until the node
-  retires: rule 6 orders no more once the matchmakers checked the node. The oracle of goal 2
+  retires: rule 6 orders no more once the matchmakers checked the node at the floor in force (a check at an earlier floor does not count). The oracle of goal 2
   (`HEALED`) judges each seed at the end of the settle rounds: each member of the configuration in
   force runs and the controller is `Steady`, or it holds `NoSpare` while no spare runs, and each
   node that left every configuration retired once a floor is effective.
