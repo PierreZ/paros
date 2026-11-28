@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-reseat/` (the held tally across a change of the replica set); `segment-reseat/` (the route, the join and the removed member across a `SetReplicas`); `heal-learn/` (the heal of a sealed segment, learned from the chain); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the floor on a decided `Hold` and the one answer to a retry below it (D9), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, `held-floor-pass/`, `held-floor-hold/`, `held-floor-retry/`, `held-floor-released/` and `held-floor-trimmed/` (a lagging replica of a released segment, `HeldTrim.tla`), which extend `truncation/`; `peer-pull/` (the liveness of the pull of a lagging replica from a peer of its segment); `held-reseat/` (the held tally across a change of the replica set); `segment-reseat/` (the route, the join and the removed member across a `SetReplicas`); `reseat-many/` (the removed members over several `SetReplicas`, and the refusal of a removed member); `heal-learn/` (the heal of a sealed segment, learned from the chain); `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2997,8 +2997,9 @@ no more and answers a read above it with "moved". The slots are chosen in any or
 `SetAt` holds the `SetReplicas` or a `Noop` of a new leader. `Sound` is the safety (a replica
 holds only chosen slots, and only a replica that a set named holds any; a read is served from the
 walked prefix); `Whole` and `Answered` are the liveness, under fair steps. The join from the
-boundary state of the chain is `compartments/`. The rule is a proposal, modelled and not built:
-`Command::SetReplicas` is not in the code yet.
+boundary state of the chain is `compartments/`. The rule is built in step 5d of the segments in
+the core: `Command::SetReplicas`, `ColocatedNode::set_replicas`, and `Replica::moved_to` with
+`LogRead::Moved` at a `ReplicaNode`; the walk `segment-reseat` of `consensus-sim` runs it.
 
 | Check | CI | Result |
 |---|---|---|
@@ -3011,6 +3012,31 @@ boundary state of the chain is `compartments/`. The rule is a proposal, modelled
 What is not in the model: the held tally across the change (`held-reseat/`), the drop of the
 segment at the acceptors (then a pull goes to a peer, `peer-pull/`, over one fixed set), and the
 pages of a long segment.
+
+### `reseat-many/`: several `SetReplicas` of one open segment, for step 5d of the segments in the core
+
+D10 of `docs/architecture/04-7-segments.md`, as the core folds several `SetReplicas` of one
+segment. The fold keeps the members that a valid `SetReplicas` removed (`JournalState::removed`):
+the members of the set before it that the new set leaves out. A replica is out once the fold at
+its walk names it removed; it then pulls and walks no more. A `SetReplicas` that names a removed
+member again is refused (`Outcome::ReseatRemoved`). The slots are chosen in any order, a slot of
+`SetSlots` holds its `SetReplicas` or a `Noop` of a new leader, the leader routes each `Commit` to
+the set that the fold gives before its slot, and a replica that a set named pulls any chosen slot.
+`Sound` is the safety (a replica holds only chosen slots, only a replica that a set named holds
+any, with the refusal no removed member is in the set, the removed members only grow, and a
+removed member walks to the `SetReplicas` that removed it and no slot past it); `Whole` is the liveness: every member of the set in force walks the whole segment.
+`segment-reseat/` checks one `SetReplicas` with its route and its reads. The rule is built in
+`journal/state.rs` (`apply_set_replicas`) and `replica.rs` (`Replica::moved_to`); the walk
+`segment-reseat` of `consensus-sim` runs it, and `MOVED_TRUE` judges each stop.
+
+| Check | CI | Result |
+|---|---|---|
+| `grow` | ci | pass of `Sound` and `Whole`: slot 1 replaces `a` by `c`, slot 2 replaces `b` by `d` (90,212 distinct states) |
+| `back` | ci | pass of `Sound` and `Whole`: slot 1 replaces `a` by `c`, slot 2 names `a` again and is refused when slot 1 holds its `SetReplicas` |
+| `back_norefuse` | ci | violation of `Whole`: the control `Refuse = FALSE`; the fold takes slot 2, and `a`, which stopped at its removal, never walks the segment it is in again |
+| `grow_state` | ci | violation of `Whole`: the control `OutRule = "state"`; a replica is out once the set at its walk leaves it out, so `d`, which slot 2 adds, is out from the start |
+| `reach_back` | ci | violation of `NoNamedAgain`: a `SetReplicas` that names a removed member is chosen |
+| `reach_grow` | ci | violation of `NoTwoRemoved`: two `SetReplicas` remove a member each |
 
 ### `heal-learn/`: the heal of a sealed segment, learned from the chain, for step 6 of the segments in the core
 

@@ -67,6 +67,7 @@ pub fn value_text(command: &Command) -> String {
         },
         Command::Roll(roll) => format!("Roll to segment {}", roll.next.0),
         Command::Hold(hold) => format!("Hold segment {}", hold.segment.0),
+        Command::SetReplicas(set) => format!("New replicas of segment {}", set.segment.0),
     }
 }
 
@@ -82,6 +83,7 @@ pub fn control_kind(command: &Command) -> Option<String> {
         Command::Control(Control::SetLeader { .. }) => Some("set_leader".to_string()),
         Command::Roll(_) => Some("roll".to_string()),
         Command::Hold(_) => Some("hold".to_string()),
+        Command::SetReplicas(_) => Some("replicas".to_string()),
     }
 }
 

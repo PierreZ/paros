@@ -58,6 +58,9 @@
 //!     trimmed only once the chosen prefix seals the segment and its
 //!     `first_seq` reaches the next position at the seal. (Oracles 10 and
 //!     11 are those of goal 2, in `healed.rs`.)
+//! 13. **A move is true** ([`MOVED_TRUE`]): a replica of a segment stops as
+//!     moved at slot `end` only once the chosen log below `end` holds a
+//!     valid `SetReplicas` of that segment that removed it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,6 +98,10 @@ pub const ROUTE_ON_PREFIX: &str =
 /// `docs/architecture/04-7-segments.md`, `TrimmedReleased` of
 /// `specs/tla/held-floor-trimmed/`).
 pub const TRIM_TRUE: &str = "a replica stops as trimmed only on a segment the chosen log released";
+/// Oracle 13: a replica stops as moved only past a valid `SetReplicas` of
+/// its segment that removed it (D10 of `docs/architecture/04-7-segments.md`,
+/// `Out` of `specs/tla/segment-reseat/`).
+pub const MOVED_TRUE: &str = "a replica stops as moved only past a SetReplicas that removed it";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -141,6 +148,22 @@ impl Ledger {
             journal: JournalSpec::default(),
             proposals: BTreeMap::new(),
         }
+    }
+
+    /// Name the bootstrap set of the first segment
+    /// (`Config::segment_replicas`), before the first slot is judged: the
+    /// journal contract needs the set that a `SetReplicas` of the first
+    /// segment replaces.
+    ///
+    /// # Panics
+    ///
+    /// If the ledger judged a slot already.
+    pub fn set_first_replicas(&mut self, first: Option<&paros_consensus::journal::ReplicaSet>) {
+        assert!(
+            self.journal.folded() == 0,
+            "the first set is named before any slot"
+        );
+        self.journal = JournalSpec::new(first);
     }
 
     /// The rule a vote at `ballot` is judged with: the configuration a
@@ -360,17 +383,57 @@ impl Ledger {
         let mut expected = (SegmentId::FIRST, first.cloned());
         for s in 0..slot.0 {
             let (_, outcome) = self.journal.judge(Slot(s), lookup);
-            if let (Outcome::Rolled(tail), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s))) {
-                expected.0 = tail.id;
-                if roll.replicas.is_some() {
-                    expected.1.clone_from(&roll.replicas);
+            match (outcome, lookup(Slot(s))) {
+                (Outcome::Rolled(tail), Some(Command::Roll(roll))) => {
+                    expected.0 = tail.id;
+                    if roll.replicas.is_some() {
+                        expected.1.clone_from(&roll.replicas);
+                    }
                 }
+                // A valid `SetReplicas` gives the tail its set from the
+                // next slot (D10).
+                (Outcome::Reseated(_), Some(Command::SetReplicas(set))) => {
+                    expected.1 = Some(set.replicas.clone());
+                }
+                _ => {}
             }
         }
         assert!(
             expected.0 == segment && expected.1.as_ref() == Some(replicas),
             "{ROUTE_TRUE}: {who} routed slot {} to {replicas:?} of segment {}, and the chosen log gives {expected:?}",
             slot.0,
+            segment.0,
+        );
+    }
+
+    /// Oracle 13: `member`, a replica of `segment`, stopped as moved at
+    /// `end`, the first slot that is not its own. Every slot below `end` is
+    /// chosen (the replica walked or jumped there), and after slot
+    /// `end - 1` the spec's tail must be `segment` with `member` removed.
+    ///
+    /// # Panics
+    ///
+    /// If the chosen log below `end` removed `member` from no `SetReplicas`
+    /// of `segment`.
+    pub fn moved_holds(&mut self, member: NodeId, segment: SegmentId, end: Slot) {
+        let last = end.0.checked_sub(1).map(Slot);
+        let after = last.and_then(|last| {
+            let (chosen, commands) = (&self.chosen, &self.commands);
+            let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+            (0..=last.0)
+                .all(|s| chosen.contains_key(&Slot(s)))
+                .then(|| {
+                    let _ = self.journal.judge(last, lookup);
+                    self.journal.removed_after(last).cloned()
+                })?
+        });
+        assert!(
+            after
+                .as_ref()
+                .is_some_and(|(tail, removed)| *tail == segment.0 && removed.contains(&member)),
+            "{MOVED_TRUE}: replica {} stopped as moved at slot {} of segment {}, and the chosen log gives {after:?}",
+            member.0,
+            end.0,
             segment.0,
         );
     }
@@ -412,7 +475,8 @@ impl Ledger {
 
     /// The journal view after the chosen `Roll` at `slot`, and the replicas
     /// the chosen log names for the segment it opens: those of the last
-    /// valid `Roll` at or below `slot` that named a set. The caller knows
+    /// valid `Roll` that named a set or valid `SetReplicas` at or below
+    /// `slot`. The caller knows
     /// every slot up to `slot` is chosen.
     fn boundary_after(&mut self, slot: Slot) -> (JournalView, u64, Option<ReplicaSet>) {
         let (chosen, commands) = (&self.chosen, &self.commands);
@@ -426,10 +490,14 @@ impl Ledger {
             if matches!(outcome, Outcome::Leader(_)) {
                 term += 1;
             }
-            if let (Outcome::Rolled(_), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s)))
-                && roll.replicas.is_some()
-            {
-                replicas.clone_from(&roll.replicas);
+            match (outcome, lookup(Slot(s))) {
+                (Outcome::Rolled(_), Some(Command::Roll(roll))) if roll.replicas.is_some() => {
+                    replicas.clone_from(&roll.replicas);
+                }
+                (Outcome::Reseated(_), Some(Command::SetReplicas(set))) => {
+                    replicas = Some(set.replicas.clone());
+                }
+                _ => {}
             }
         }
         (view, term, replicas)

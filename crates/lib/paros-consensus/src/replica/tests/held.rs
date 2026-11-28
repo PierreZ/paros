@@ -58,7 +58,7 @@ impl Held {
         records: &BTreeMap<Slot, (Ballot, Command)>,
     ) -> Self {
         Self {
-            replica: Replica::from_boot(mode, chosen_index, floor, sealed, records),
+            replica: Replica::from_boot(mode, None, chosen_index, floor, sealed, records),
             log: records.clone(),
         }
     }

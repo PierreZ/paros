@@ -47,7 +47,7 @@ use paros_consensus::matchmaker::{
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{
-    BeliefSource, Delegation, ProposeResult, ReconfigureResult, RollResult,
+    BeliefSource, Delegation, ProposeResult, ReconfigureResult, RollResult, SetReplicasResult,
 };
 use paros_consensus::quorum_read::ReadOpen;
 use paros_consensus::{
@@ -100,6 +100,19 @@ pub mod reach {
     /// A replica of a segment lags below the floor of every node, and the
     /// segment is not released: only a peer replica can serve it (R8).
     pub const PEER_ONLY: &str = "cluster: a replica lags below every node's floor";
+    /// A leader admitted a `SetReplicas` of the open segment (D10).
+    pub const RESEAT_ADMITTED: &str = "cluster: a leader admitted a SetReplicas";
+    /// A `SetReplicas` left a replica out, and it stopped there (D10).
+    pub const RESEAT_MOVED: &str = "cluster: a replica stopped at the SetReplicas that left it out";
+    /// A replica that a `SetReplicas` added sealed the whole segment (D10).
+    pub const RESEAT_JOINED: &str =
+        "cluster: a replica that a SetReplicas added sealed its segment";
+    /// The first site slept through the `SetReplicas` that removed it, and
+    /// stopped there once it caught up (D10).
+    pub const RESEAT_LAGGED: &str = "cluster: a removed sleeper stopped at its SetReplicas";
+    /// A `SetReplicas` named again a member that an earlier one removed, and
+    /// the journal refused it (D10).
+    pub const RESEAT_REFUSED: &str = "cluster: a SetReplicas naming a removed member was refused";
     /// A majority of the matchmakers holds a node's publish of the end of a
     /// segment (R5): the chain grows.
     pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
@@ -349,6 +362,15 @@ pub struct Cluster {
     decree_rounds: Vec<u64>,
     /// The nodes the operator retired: down until it books them again.
     retired: BTreeSet<NodeId>,
+    /// The replica sites that a valid `SetReplicas` of the first segment
+    /// named, as a node applied it: a site that no set of its segment named
+    /// keeps nothing, so the liveness judge asks nothing of it.
+    reseated: BTreeSet<NodeId>,
+    /// Whether the first replica site, the one that the `SetReplicas` of
+    /// [`LastSite::Added`](crate::cluster::flavor::LastSite::Added) removes,
+    /// sleeps until the settle rounds too: then it lags through its removal
+    /// and pulls up to it from the acceptors or its peers.
+    first_sleeps: bool,
     /// The reconfigurations the operator asked for: each ballot and the
     /// members it names.
     asked: Vec<(Ballot, Vec<NodeId>)>,
@@ -427,6 +449,9 @@ impl Model for Cluster {
                 if self.flavor.steer == Steer::Reconfiguring && cx.rng().chance(1, 4) =>
             {
                 self.reconfigure(cx);
+            }
+            Action::Propose if self.flavor.last_site.reseats() && cx.rng().chance(1, 4) => {
+                self.set_replicas(cx);
             }
             Action::Propose
                 if self.flavor.steer == Steer::Rolling
@@ -514,7 +539,9 @@ impl Model for Cluster {
                     return;
                 };
                 forge_release(mutant, &mut msg, replica);
+                forge_move(mutant, &mut msg, replica, id);
                 let trimmed = replica.is_trimmed();
+                let moved = replica.replica().is_moved();
                 replica.step(msg);
                 // Only a trim point turns a replica trimmed.
                 if replica.is_trimmed() && !trimmed {
@@ -526,6 +553,9 @@ impl Model for Cluster {
                         .trim_holds(&format!("replica {}", id.0), segment);
                 }
                 self.drain_replica(id, cx);
+                // The step itself may carry the replica past its removal
+                // (a walk, a pull page or a trim point).
+                self.judge_move(id, moved);
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
             (Party::Matchmaker(id), Wire::Gc(request)) => self.gc_request(id, &request, cx),
@@ -730,17 +760,21 @@ impl Model for Cluster {
         // its segment released while it lagged keeps nothing more. A replica
         // seals only when its walk applies the `Roll` of its segment (R6), so
         // a sealed one stands at its end and passes by construction; the
-        // check fails only when a walk stops short of its end.
-        for site in self
-            .replicas
-            .iter()
-            .filter(|s| !s.live.as_ref().is_some_and(ReplicaNode::is_trimmed))
-        {
+        // check fails only when a walk stops short of its end. A replica
+        // that a `SetReplicas` left out stops there (D10), and is judged the
+        // same way at that end; one that no set of its segment named keeps
+        // nothing and is not judged.
+        let first = self.party_config(NodeId(0)).segment_replicas;
+        for site in self.replicas.iter().filter(|s| {
+            !s.live.as_ref().is_some_and(ReplicaNode::is_trimmed)
+                && (first.as_ref().is_none_or(|set| set.contains(s.id))
+                    || self.reseated.contains(&s.id))
+        }) {
             let reached = site.live.as_ref().map(|r| r.replica().first_unchosen());
             let end = site
                 .live
                 .as_ref()
-                .and_then(|r| r.replica().sealed_end())
+                .and_then(|r| r.replica().ended_at())
                 .map_or(frontier, |end| end.min(frontier));
             if reached.is_none_or(|r| r < end) {
                 return Err(format!(
@@ -840,6 +874,8 @@ impl Cluster {
             reconfigurers: Vec::new(),
             decree_rounds: Vec::new(),
             retired: BTreeSet::new(),
+            reseated: BTreeSet::new(),
+            first_sleeps: flavor.last_site.reseats() && cx.rng().chance(1, 2),
             asked: Vec::new(),
             checking: None,
             admitted: BTreeMap::new(),
@@ -849,6 +885,8 @@ impl Cluster {
             pool,
             flavor,
         };
+        let first = cluster.party_config(NodeId(0)).segment_replicas;
+        cluster.ledger.set_first_replicas(first.as_ref());
         cluster.decree_rounds = vec![0; cluster.pool.len()];
         cluster.reconfigurers = cluster
             .pool
@@ -866,8 +904,13 @@ impl Cluster {
                 ReplicaSite::new(id, cluster.party_config(id), cluster.flavor.limits)
             })
             .collect();
+        let sleepers: Vec<NodeId> = cluster
+            .replica_ids()
+            .into_iter()
+            .filter(|id| cluster.is_sleeper(*id))
+            .collect();
         for site in &mut cluster.replicas {
-            if cluster.flavor.sleeper && site.id.0 + 1 == REPLICA_BASE + cluster.flavor.replicas {
+            if sleepers.contains(&site.id) {
                 site.live = None;
             }
         }
@@ -1031,7 +1074,10 @@ impl Cluster {
             proxy_count: usize::try_from(self.flavor.proxies).expect("a few proxies"),
             replica_count: usize::try_from(self.flavor.replicas).expect("a few replicas"),
             segment_replicas: self.flavor.segment_replicas.then(|| {
-                ReplicaSet::new((0..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)))
+                // A walk that reseats keeps its last site out of the first
+                // set: the `SetReplicas` adds it.
+                let named = self.flavor.replicas - u64::from(self.flavor.last_site.reseats());
+                ReplicaSet::new((0..named).map(|i| NodeId(REPLICA_BASE + i)))
             }),
             ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
         }
@@ -1081,10 +1127,12 @@ impl Cluster {
         &mut self.proxies[Self::index(id.0)]
     }
 
-    /// Whether `id` is the replica site that [`Flavor::sleeper`] keeps down
+    /// Whether `id` is the replica site that [`LastSite::Sleeper`](crate::cluster::flavor::LastSite) keeps down
     /// until the settle rounds.
     fn is_sleeper(&self, id: NodeId) -> bool {
-        self.flavor.sleeper && id.0 + 1 == REPLICA_BASE + self.flavor.replicas
+        let last =
+            self.flavor.last_site.sleeps() && id.0 + 1 == REPLICA_BASE + self.flavor.replicas;
+        last || (self.first_sleeps && id.0 == REPLICA_BASE)
     }
 
     fn replica(&self, id: NodeId) -> &ReplicaSite {
@@ -1639,6 +1687,15 @@ impl Cluster {
         outcome: &Outcome,
         cx: &mut Cx<'_, Self>,
     ) {
+        if let (Outcome::Reseated(set), Command::SetReplicas(asked)) = (outcome, command)
+            && asked.segment == paros_consensus::journal::SegmentId::FIRST
+        {
+            self.reseated.extend(set.members().iter().copied());
+        }
+        sometimes!(
+            matches!(outcome, Outcome::ReseatRemoved(_)),
+            reach::RESEAT_REFUSED
+        );
         let before = self.ledger.applied(who, slot, command, outcome);
         self.reads.applied(slot);
         if let Some(event) = self.tracer.fold(slot, outcome) {
@@ -1702,7 +1759,38 @@ impl Cluster {
         }
     }
 
+    /// Drain replica `id`, and judge its stop if it turned moved there: a
+    /// drain resumes a paged walk, after a tick, a read, a boot or a step.
     fn drain_replica(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
+        let moved = self
+            .replica(id)
+            .live
+            .as_ref()
+            .is_some_and(|r| r.replica().is_moved());
+        self.drain_replica_batches(id, cx);
+        self.judge_move(id, moved);
+    }
+
+    /// Oracle 13 ([`MOVED_TRUE`](crate::oracle::ledger::MOVED_TRUE)) on
+    /// replica `id`, when it is moved now and was not (`moved`) before.
+    fn judge_move(&mut self, id: NodeId, moved: bool) {
+        if let Some(replica) = self.replica(id).live.as_ref()
+            && replica.replica().is_moved()
+            && !moved
+        {
+            let segment = replica
+                .replica()
+                .segment_bound()
+                .expect("a moved replica keeps a segment");
+            let end = replica
+                .replica()
+                .ended_at()
+                .expect("a moved replica has an end");
+            self.ledger.moved_holds(id, segment, end);
+        }
+    }
+
+    fn drain_replica_batches(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let pool = self.pool.clone();
         // A replica pages its peers of a segment, which are replica sites.
         let replicas = self.replica_ids();
@@ -1724,6 +1812,12 @@ impl Cluster {
                         })
                 })
             });
+            // The site that a `SetReplicas` added: the last one, which no
+            // first set names.
+            let added = self.flavor.last_site.reseats()
+                && id.0 + 1 == REPLICA_BASE + self.flavor.replicas
+                && self.reseated.contains(&id);
+            let lagged = self.first_sleeps && id.0 == REPLICA_BASE;
             let site = self.replica_mut(id);
             let Some(replica) = site.live.as_mut() else {
                 return;
@@ -1742,6 +1836,9 @@ impl Cluster {
             let read_states = ready.read_states().to_vec();
             ready.advance();
             sometimes!(replica.is_trimmed(), reach::REPLICA_TRIMMED);
+            sometimes!(replica.replica().is_moved(), reach::RESEAT_MOVED);
+            sometimes!(lagged && replica.replica().is_moved(), reach::RESEAT_LAGGED);
+            sometimes!(added && replica.replica().is_sealed(), reach::RESEAT_JOINED);
             let open = !replica.replica().is_sealed() && !replica.is_trimmed();
             sometimes!(open && past, reach::PEER_ONLY);
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
@@ -2019,6 +2116,34 @@ impl Cluster {
         self.leaders()
             .into_iter()
             .find(|id| self.held_recovery.contains(id))
+    }
+
+    /// The operator replaces the first replica site of the first segment by
+    /// the last one ([`LastSite::Added`](crate::cluster::flavor::LastSite::Added)), at a leader whose fold stands in
+    /// the first segment, or, half the time when the first site is awake,
+    /// names every site: before the removal that only adds the last site,
+    /// and after it the journal refuses it, since it names the removed site
+    /// again.
+    fn set_replicas(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(leader) = self.pick_leader(cx) else {
+            return;
+        };
+        // A seed whose first site sleeps never adds the last site beside
+        // it: two of the four sites would be down in the set in force,
+        // more than the `F` = 1 down that the held rules allow (R7).
+        let from = u64::from(self.first_sleeps || cx.rng().chance(1, 2));
+        let target =
+            ReplicaSet::new((from..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)));
+        let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
+        if node.replica().journal().segment.id != paros_consensus::journal::SegmentId::FIRST {
+            return;
+        }
+        let result = node.set_replicas(target);
+        sometimes!(
+            matches!(result, SetReplicasResult::Accepted { .. }),
+            reach::RESEAT_ADMITTED
+        );
+        self.drain_node(leader, cx);
     }
 
     fn roll(&mut self, cx: &mut Cx<'_, Self>) {
@@ -2600,6 +2725,38 @@ fn forge_release(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNod
     }
 }
 
+/// [`Mutant::ForgeMove`]: a trim point inside the segment that `replica`
+/// keeps, shaped as a removal of the replica: its state names the replica
+/// among the removed members of the tail, and a set without it. The
+/// replica then stops as moved where no `SetReplicas` removed it.
+fn forge_move(mutant: Option<Mutant>, msg: &mut Message, replica: &ReplicaNode, me: NodeId) {
+    if let (Some(Mutant::ForgeMove), Message::TrimmedTo { point, state, .. }) = (mutant, msg)
+        && state.segment.start < *point
+        && replica.replica().segment_bound() == Some(state.segment.id)
+    {
+        let others: Vec<NodeId> = state
+            .replicas
+            .iter()
+            .flat_map(ReplicaSet::members)
+            .copied()
+            .filter(|n| *n != me)
+            .collect();
+        let others = if others.is_empty() {
+            vec![NodeId(me.0 + 1)]
+        } else {
+            others
+        };
+        let removed = state
+            .removed
+            .iter()
+            .flat_map(ReplicaSet::members)
+            .copied()
+            .chain([me]);
+        state.removed = Some(ReplicaSet::new(removed.collect::<BTreeSet<_>>()));
+        state.replicas = Some(ReplicaSet::new(others));
+    }
+}
+
 /// What the driver reads of a node before its batch: the tracer's view of
 /// its leadership and campaign, and where a GC request goes.
 struct Seen {
@@ -2818,6 +2975,7 @@ fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     // it, for the same reason: the walks that send one digest as they did
     // before the field existed, and a head that says more is judged.
     let text = format!("{batch:?}")
+        .replace(", removed: None }", " }")
         .replace(", held: None }", " }")
         .replace(", replicas: None }", " }");
     let text = without_trim_first_seq(&text);

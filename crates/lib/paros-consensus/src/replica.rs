@@ -55,10 +55,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::write::WriteOp;
-use crate::journal::segment::{Segment, SegmentId};
+use crate::journal::segment::{ReplicaSet, Segment, SegmentId};
 use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::journal::{Command, Entry, Seq};
-use crate::types::{Ballot, Slot, Value};
+use crate::types::{Ballot, NodeId, Slot, Value};
 
 use crate::contract::limits::APPLY_BATCH;
 
@@ -123,6 +123,22 @@ pub enum LogRead {
         end: Seq,
         /// The segment the `Roll` opened.
         next: Segment,
+    },
+    /// The read starts at or past the position where a `SetReplicas` of the
+    /// segment this replica keeps left it out (D10 of §4.7): its walk
+    /// applied that `SetReplicas` and stopped there, so the records above
+    /// it are not this replica's. The reader asks a member of `replicas`.
+    /// Only a bound replica that its deployment named
+    /// ([`Replica::set_member`]) answers this; the control `no_moved` of
+    /// `specs/tla/segment-reseat/` leaves such a read waiting for ever.
+    Moved {
+        /// The journal's next position at the head of the fold: after the
+        /// `SetReplicas` (it takes no position), or at the point of a trim
+        /// jump that carried the replica past it. A position below it that
+        /// the replica does not hold is answered "not here".
+        end: Seq,
+        /// The replicas of the segment that the `SetReplicas` named.
+        replicas: ReplicaSet,
     },
 }
 
@@ -225,6 +241,12 @@ pub struct Replica {
     /// The journal's writer mode (#241): configuration, fixed at creation,
     /// handed to every [`JournalState::apply`].
     mode: WriterMode,
+    /// The bootstrap set of the first segment
+    /// ([`crate::contract::Config::segment_replicas`]): configuration, the
+    /// same on every node, handed to every [`JournalState::apply`]. Boxed:
+    /// it is read only at a `SetReplicas`, and a node stays small on the
+    /// stack.
+    first_replicas: Option<Box<ReplicaSet>>,
     /// The most slots one walk releases (#338): a node tunable in
     /// `1..=APPLY_BATCH`, the constant by default
     /// ([`Replica::set_apply_page`]).
@@ -233,6 +255,10 @@ pub struct Replica {
     /// keeps the whole log (a node's). A bound fold stops after the `Roll`
     /// that ends the segment ([`Replica::is_sealed`]).
     bound: Option<SegmentId>,
+    /// The replica this fold belongs to, once its deployment named it
+    /// ([`Replica::set_member`]): a bound fold stops at a `SetReplicas` of
+    /// its segment that leaves it out ([`Replica::is_moved`]).
+    member: Option<NodeId>,
     /// Whether the records of a held segment go with a compaction
     /// ([`Replica::set_held_records`]).
     held_records: HeldRecords,
@@ -243,7 +269,8 @@ impl Replica {
     /// chosen index, the retention floor and the journal state sealed at it,
     /// and the retained accepted log (every record at or below the chosen
     /// index carries the chosen value — the P2c chain), under the journal's
-    /// writer `mode`.
+    /// writer `mode` and the bootstrap set `first_replicas` of the first
+    /// segment.
     ///
     /// The fold starts from the sealed state at the floor and replays the
     /// retained chosen records in slot order, stopping at the first one the
@@ -259,6 +286,7 @@ impl Replica {
     #[must_use]
     pub fn from_boot(
         mode: WriterMode,
+        first_replicas: Option<ReplicaSet>,
         chosen_index: Option<Slot>,
         floor: Slot,
         sealed: JournalState,
@@ -291,8 +319,10 @@ impl Replica {
             compaction_due: false,
             committed: Vec::new(),
             mode,
+            first_replicas: first_replicas.map(Box::new),
             apply_page: APPLY_BATCH,
             bound: None,
+            member: None,
             held_records: HeldRecords::Keep,
         };
         replica.refold(records);
@@ -449,7 +479,11 @@ impl Replica {
                 "a bound fold never passes the end of its segment"
             );
         }
-        if self.is_sealed() {
+        assert!(
+            !(self.is_sealed() && self.is_moved()),
+            "a replica is sealed or moved, never both"
+        );
+        if self.has_ended() {
             assert!(
                 self.chosen.last().is_none_or(|s| *s < self.folded),
                 "a sealed replica holds no chosen slot past its end"
@@ -1048,6 +1082,14 @@ impl Replica {
                 next: self.state.segment,
             };
         }
+        if let Some(replicas) = self.moved_to()
+            && from >= state.next_seq
+        {
+            return LogRead::Moved {
+                end: state.next_seq,
+                replicas: replicas.clone(),
+            };
+        }
         if from < self.base.next_seq {
             // The record exists in the journal, just not here.
             assert!(
@@ -1222,7 +1264,7 @@ impl Replica {
         self.drop_past_end();
         assert!(self.bound == Some(kept), "the replica is bound to its base");
         assert!(
-            !self.advance_pending || !self.is_sealed(),
+            !self.advance_pending || !self.has_ended(),
             "a sealed replica defers no walk"
         );
     }
@@ -1264,7 +1306,7 @@ impl Replica {
     /// the walk defers nothing. Returns the first slot past the end, the
     /// slot its caller drops its records from.
     fn drop_past_end(&mut self) -> Option<Slot> {
-        if !self.is_sealed() {
+        if !self.has_ended() {
             return None;
         }
         // A sealed fold applied the `Roll`, so it reached the first unchosen
@@ -1282,6 +1324,77 @@ impl Replica {
             "a sealed replica holds no chosen slot past its end"
         );
         Some(end)
+    }
+
+    /// Name the replica this fold belongs to, once, before it is bound: a
+    /// bound fold then stops at a `SetReplicas` of its segment that leaves
+    /// it out ([`Replica::is_moved`]). A node's learner is never named.
+    ///
+    /// # Panics
+    ///
+    /// If the fold was named already: a deployment names its replica once.
+    pub fn set_member(&mut self, member: NodeId) {
+        assert!(self.member.is_none(), "a replica is named once");
+        self.member = Some(member);
+        assert!(self.member == Some(member), "the replica keeps its name");
+    }
+
+    /// The replicas that a `SetReplicas` of the segment this replica keeps
+    /// named without it (D10 of §4.7), once its fold applied it: the walk
+    /// stops there, and a read at or past its position is
+    /// [`LogRead::Moved`]. The fold names the replica among the removed
+    /// members of the tail ([`JournalState::removed`]): a set that never
+    /// named it, as the boundary of a segment it joins before the
+    /// `SetReplicas` that adds it, does not move it. The rule is a function
+    /// of the fold, so a reboot or a compaction past the `SetReplicas` keeps
+    /// it. `None` for an unbound or unnamed replica, and for a sealed one.
+    ///
+    /// # Panics
+    ///
+    /// If the fold names the replica both removed and in the set: a broken
+    /// state, a programmer error.
+    #[must_use]
+    pub fn moved_to(&self) -> Option<&ReplicaSet> {
+        let kept = self.bound?;
+        let member = self.member?;
+        if self.state.segment.id != kept {
+            return None;
+        }
+        if !self.state.removed.as_ref()?.contains(member) {
+            return None;
+        }
+        let set = self
+            .state
+            .replicas
+            .as_ref()
+            .expect("a SetReplicas that removed a member named the set after it");
+        assert!(
+            !set.contains(member),
+            "a removed member is not in the set of its segment"
+        );
+        Some(set)
+    }
+
+    /// Whether a `SetReplicas` of the segment this replica keeps left it
+    /// out ([`Replica::moved_to`]).
+    #[must_use]
+    pub fn is_moved(&self) -> bool {
+        self.moved_to().is_some()
+    }
+
+    /// Whether the segment ended for this replica: it is sealed or moved,
+    /// and its walk stops.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.is_sealed() || self.is_moved()
+    }
+
+    /// The first slot that is not this replica's once its segment ended
+    /// for it ([`Replica::has_ended`]): the slot after the `Roll` of a
+    /// sealed replica, or after the `SetReplicas` that moved it.
+    #[must_use]
+    pub fn ended_at(&self) -> Option<Slot> {
+        self.has_ended().then_some(self.folded)
     }
 
     /// The first slot past the end of the segment this replica keeps, once
@@ -1310,7 +1423,7 @@ impl Replica {
         );
         assert!(slot >= self.folded, "a folded slot is never relearned");
         assert!(
-            !self.is_sealed(),
+            !self.has_ended(),
             "a sealed replica learns no slot past the end of its segment"
         );
         // The pair of the coupling `chosen_command` reads back: the caller
@@ -1341,7 +1454,13 @@ impl Replica {
         );
         let before = self.state.clone();
         let mut state = self.state.clone();
-        let outcome = state.apply(self.mode, slot, command, |seq| self.accepted_at(log, seq));
+        let outcome = state.apply(
+            self.mode,
+            self.first_replicas.as_deref(),
+            slot,
+            command,
+            |seq| self.accepted_at(log, seq),
+        );
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             // The index stays monotone: the head's write starts past every
@@ -1394,7 +1513,7 @@ impl Replica {
     /// slot it now holds.
     fn refold<L: ChosenLog + ?Sized>(&mut self, log: &L) {
         let end = self.first_unchosen();
-        while self.folded < end && !self.is_sealed() {
+        while self.folded < end && !self.has_ended() {
             let slot = self.folded;
             if !self.chosen.contains(&slot) {
                 break;
@@ -1438,7 +1557,7 @@ impl Replica {
         if self.folded == self.first_unchosen() {
             let mut next = self.first_unchosen();
             let mut advanced = 0_usize;
-            while advanced < self.apply_page && !self.is_sealed() && self.chosen.contains(&next) {
+            while advanced < self.apply_page && !self.has_ended() && self.chosen.contains(&next) {
                 // The walk is the *only* writer of `chosen_index`, and it
                 // advances exactly one slot per iteration — the contiguity the
                 // apply seam and the boot rebuild are built on.
@@ -1467,7 +1586,7 @@ impl Replica {
             // chosen prefix, or exactly one bounded chunk was released.
             assert!(
                 advanced == self.apply_page
-                    || self.is_sealed()
+                    || self.has_ended()
                     || !self.chosen.contains(&self.first_unchosen()),
                 "the walk consumes, bounds or seals the contiguous chosen prefix"
             );

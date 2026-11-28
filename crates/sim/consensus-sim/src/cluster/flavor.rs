@@ -56,12 +56,42 @@ pub struct Flavor {
     /// it whole (`Message::SegmentHeld`), and the leader holds it with a
     /// `Hold` that drops its records at the acceptors (R7 of §4.7).
     pub segment_replicas: bool,
-    /// A steer for the heal of a segment: the last replica site is down
-    /// from the start until the settle rounds (a long outage, a legal
-    /// fault). Its
-    /// peers hold the segment meanwhile, and the acceptors drop it at the
-    /// `Hold`, so when it boots only a peer can serve it (R8 of §4.7).
-    pub sleeper: bool,
+    /// What the last replica site does ([`LastSite`]).
+    pub last_site: LastSite,
+}
+
+/// What the last replica site of a flavor does: a steer for the heal of a
+/// segment and for the change of its replicas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LastSite {
+    /// It runs as every other site.
+    #[default]
+    Awake,
+    /// It is down from the start until the settle rounds (a long outage, a
+    /// legal fault). Its peers hold the segment meanwhile, and the
+    /// acceptors drop it at the `Hold`, so when it boots only a peer can
+    /// serve it (R8 of §4.7).
+    Sleeper,
+    /// It sleeps too, and it is not a replica of the first segment: the
+    /// operator proposes, while the tail is the first segment, the
+    /// `SetReplicas` (D10 of §4.7) that drops the first site and adds the
+    /// last (`ColocatedNode::set_replicas`, in a quarter of the proposals).
+    /// The removed site stops at it and the added one pulls the segment.
+    Added,
+}
+
+impl LastSite {
+    /// Whether the last site sleeps until the settle rounds.
+    #[must_use]
+    pub fn sleeps(self) -> bool {
+        self != Self::Awake
+    }
+
+    /// Whether the walk replaces the first site by the last one.
+    #[must_use]
+    pub fn reseats(self) -> bool {
+        self == Self::Added
+    }
 }
 
 /// The steer of a walk: the one rare protocol event that the walk moves
@@ -128,7 +158,7 @@ impl Flavor {
             mutant: None,
             controllers: false,
             segment_replicas: false,
-            sleeper: false,
+            last_site: LastSite::Awake,
         }
     }
 
@@ -436,8 +466,25 @@ impl Flavor {
             name: "segment-replicas",
             replicas: 3,
             segment_replicas: true,
-            sleeper: true,
+            last_site: LastSite::Sleeper,
             ..Self::segments()
+        }
+    }
+
+    /// A change of the replicas of the open segment (D10 of §4.7): the walk
+    /// of [`segment_replicas`](Flavor::segment_replicas) with four replica
+    /// sites, the first three the replicas of the first segment and the
+    /// last asleep until the settle rounds, and the `SetReplicas`
+    /// ([`LastSite::Added`]) that replaces the first site by the
+    /// last. The removed site stops at it, and the added one boots late and
+    /// pulls the whole segment, from the acceptors or from a peer.
+    #[must_use]
+    pub fn segment_reseat() -> Self {
+        Self {
+            name: "segment-reseat",
+            replicas: 4,
+            last_site: LastSite::Added,
+            ..Self::segment_replicas()
         }
     }
 
@@ -611,6 +658,12 @@ pub enum Mutant {
     /// trimmed while the chosen log still keeps writes of its segment.
     /// Caught by [`TRIM_TRUE`](crate::oracle::ledger::TRIM_TRUE).
     ForgeTrimRelease,
+    /// The network makes a trim point that it delivers to a replica, inside
+    /// the segment the replica keeps, name the replica among the removed
+    /// members of its tail. The replica then stops as moved where no
+    /// `SetReplicas` removed it. Caught by
+    /// [`MOVED_TRUE`](crate::oracle::ledger::MOVED_TRUE).
+    ForgeMove,
     /// The driver drops every order of the journal controllers: the member
     /// that stopped for good stays in the configuration. Caught by
     /// [`HEALED`](crate::oracle::healed::HEALED) at the end of the settle

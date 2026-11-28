@@ -43,13 +43,23 @@
 //!   prefix it was judged against. From then on, a write below the held
 //!   prefix's `next_seq` and at or above `first_seq` is `Held`: the replicas
 //!   of its segment answer for it.
+//! - `SetReplicas(segment, replicas)` (§4.7, D10) is valid when it names the
+//!   tail segment and no member that an earlier valid `SetReplicas` of the
+//!   tail removed. It then names the new set, and every member of the set
+//!   before it (the last set a `Roll` or a `SetReplicas` named, else the
+//!   bootstrap set) that the new set leaves out is removed until the next
+//!   valid `Roll`. One of another segment moves nothing and names the tail;
+//!   one that names a removed member moves nothing and names that member
+//!   (the lowest such).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use paros_consensus::Slot;
+use paros_consensus::journal::ReplicaSet;
 use paros_consensus::journal::{
     Command, Control, Entry, Hold, JournalView, LeaderUuid, Outcome, Segment, SegmentId, Seq,
+    SetReplicas,
 };
+use paros_consensus::{NodeId, Slot};
 
 /// The oracle: every party folds a slot to the outcome the journal rules
 /// give, whatever the core computes.
@@ -69,13 +79,30 @@ pub struct JournalSpec {
     ends: Vec<(u64, u64)>,
     /// The last valid `Hold`: the held prefix.
     held: Option<Hold>,
+    /// The bootstrap set of the first segment, if the deployment names one.
+    first_replicas: Option<BTreeSet<NodeId>>,
+    /// The last set that a valid `Roll` or `SetReplicas` named.
+    replicas: Option<BTreeSet<NodeId>>,
+    /// The members that a valid `SetReplicas` of the tail removed.
+    removed: BTreeSet<NodeId>,
     /// Every accepted write, by the position of its first record.
     accepted: BTreeMap<u64, Entry>,
     /// Per folded slot: the view before it and the outcome it gets.
     folded: Vec<(JournalView, Outcome)>,
+    /// Per folded slot: the tail segment and the removed members after it.
+    removed_after: Vec<(u64, BTreeSet<NodeId>)>,
 }
 
 impl JournalSpec {
+    /// The spec of a deployment whose first segment is kept by `first`.
+    #[must_use]
+    pub fn new(first: Option<&ReplicaSet>) -> Self {
+        Self {
+            first_replicas: first.map(|set| set.members().iter().copied().collect()),
+            ..Self::default()
+        }
+    }
+
     /// The view before `slot` and the outcome of `slot`, once the spec
     /// folded every slot up to it. `chosen(s)` is the command a durable
     /// quorum chose at `s`.
@@ -101,6 +128,8 @@ impl JournalSpec {
             let before = self.view();
             let outcome = self.step(at, command);
             self.folded.push((before, outcome));
+            self.removed_after
+                .push((self.segment, self.removed.clone()));
         }
         &self.folded[index]
     }
@@ -139,6 +168,15 @@ impl JournalSpec {
         self.first
     }
 
+    /// The tail segment and the members that a `SetReplicas` of it
+    /// removed, after `slot`, once the spec folded it.
+    #[must_use]
+    pub fn removed_after(&self, slot: Slot) -> Option<&(u64, BTreeSet<NodeId>)> {
+        usize::try_from(slot.0)
+            .ok()
+            .and_then(|k| self.removed_after.get(k))
+    }
+
     /// How many slots the spec folded.
     #[must_use]
     pub fn folded(&self) -> u64 {
@@ -156,8 +194,18 @@ impl JournalSpec {
     fn step(&mut self, slot: Slot, command: &Command) -> Outcome {
         match command {
             Command::Control(Control::Noop) => Outcome::Noop,
-            Command::Roll(roll) => self.roll(slot, roll.next),
+            Command::Roll(roll) => {
+                let outcome = self.roll(slot, roll.next);
+                if matches!(outcome, Outcome::Rolled(_)) {
+                    if let Some(set) = &roll.replicas {
+                        self.replicas = Some(set.members().iter().copied().collect());
+                    }
+                    self.removed.clear();
+                }
+                outcome
+            }
             Command::Hold(hold) => self.hold(*hold),
+            Command::SetReplicas(set) => self.set_replicas(set),
             Command::Write(entry) => self.write(entry),
             Command::Control(Control::SetLeader { new, old }) => self.set_leader(*new, *old),
             Command::Control(Control::Truncate { leader, up_to }) => self.truncate(*leader, *up_to),
@@ -220,6 +268,27 @@ impl JournalSpec {
         self.segment = next.0;
         self.segment_start = slot.0 + 1;
         Outcome::Rolled(self.tail())
+    }
+
+    /// A `SetReplicas` is valid only for the tail segment and when it names
+    /// no removed member; the members it leaves out of the set before it
+    /// are removed. The route of the set is judged by the oracle of the
+    /// segment replicas.
+    fn set_replicas(&mut self, set: &SetReplicas) -> Outcome {
+        if set.segment.0 != self.segment {
+            return Outcome::ReseatIgnored(self.tail());
+        }
+        let named: BTreeSet<NodeId> = set.replicas.members().iter().copied().collect();
+        if let Some(member) = named.intersection(&self.removed).next() {
+            return Outcome::ReseatRemoved(*member);
+        }
+        let before = self.replicas.as_ref().or(self.first_replicas.as_ref());
+        let gone: Vec<NodeId> = before.map_or_else(Vec::new, |before| {
+            before.difference(&named).copied().collect()
+        });
+        self.removed.extend(gone);
+        self.replicas = Some(named);
+        Outcome::Reseated(set.replicas.clone())
     }
 
     fn hold(&mut self, hold: Hold) -> Outcome {

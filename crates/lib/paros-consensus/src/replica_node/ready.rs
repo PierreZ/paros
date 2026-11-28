@@ -48,7 +48,8 @@ impl ReplicaReady<'_> {
         let me = self.node.config.id;
         let messages = &self.node.pending_messages;
         // A replica speaks only in its own name, and each message goes to
-        // one party: a pooled node, or one peer of its segment (R8). It
+        // one party: a pooled node, or one peer of its segment or member
+        // that a `SetReplicas` of it removed (R8, D10). It
         // never fans out and never addresses itself.
         for (audience, message) in messages {
             assert!(
@@ -69,11 +70,11 @@ impl ReplicaReady<'_> {
                             && replicas
                                 .members()
                                 .iter()
-                                .all(|to| *to != me && self.node.is_segment_peer(*to))
+                                .all(|to| *to != me && self.node.serves_pull_of(*to))
                     }
                     _ => false,
                 },
-                "a replica's message goes to one pooled node or one peer of its segment"
+                "a replica's message goes to one pooled node, or one peer or removed member of its segment"
             );
             assert!(
                 !matches!(message, Message::CatchUpResponse { .. })
@@ -103,28 +104,30 @@ impl ReplicaReady<'_> {
         reads
     }
 
-    /// Quorum reads this sealed replica answers "sealed" (R6 of
-    /// `docs/architecture/04-7-segments.md`): the row confirmed an index
-    /// past the end of its segment. The driver answers each one with the
-    /// records of the segment from the read's position
+    /// Quorum reads that this replica answers "sealed" or "moved" (R6 and
+    /// D10 of `docs/architecture/04-7-segments.md`): the row confirmed an
+    /// index past the end of its segment, at the `Roll` that sealed it or
+    /// at the `SetReplicas` that left it out. The driver answers each one
+    /// with the records of the segment from the read's position
     /// ([`ReplicaNode::read_log`](super::ReplicaNode::read_log), which ends
-    /// with [`LogRead::Sealed`](crate::replica::LogRead::Sealed)), and the
-    /// reader asks a replica of the next segment for the rest.
+    /// with [`LogRead::Sealed`](crate::replica::LogRead::Sealed) or
+    /// [`LogRead::Moved`](crate::replica::LogRead::Moved)), and the reader
+    /// asks a replica of the next segment, or of the new set, for the rest.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants fails: a programmer error,
     /// never an operating condition.
     #[must_use]
-    pub fn sealed_reads(&self) -> &[ReadState] {
-        let reads = &self.node.pending_sealed_reads;
+    pub fn ended_reads(&self) -> &[ReadState] {
+        let reads = &self.node.pending_ended_reads;
         assert!(
-            reads.is_empty() || self.node.replica.is_sealed(),
-            "only a sealed replica answers a read sealed"
+            reads.is_empty() || self.node.replica.has_ended(),
+            "only a replica whose segment ended answers a read sealed or moved"
         );
         assert!(
             reads.iter().all(|r| !self.node.replica.covers(r.index)),
-            "a read answered sealed asks past the end of the segment"
+            "a read answered sealed or moved asks past the end of the segment"
         );
         reads
     }
@@ -160,7 +163,7 @@ impl ReplicaReady<'_> {
         self.writes().is_empty()
             && self.messages().is_empty()
             && self.read_states().is_empty()
-            && self.sealed_reads().is_empty()
+            && self.ended_reads().is_empty()
             && self.committed().is_empty()
     }
 

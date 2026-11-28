@@ -117,6 +117,22 @@ fn segment_replicas() {
 }
 
 #[test]
+fn segment_reseat() {
+    walk(
+        Flavor::segment_reseat(),
+        &[
+            reach::ROLLED,
+            reach::HELD_DROP,
+            reach::RESEAT_ADMITTED,
+            reach::RESEAT_MOVED,
+            reach::RESEAT_JOINED,
+            reach::RESEAT_LAGGED,
+            reach::RESEAT_REFUSED,
+        ],
+    );
+}
+
+#[test]
 fn leader_handoff() {
     walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }

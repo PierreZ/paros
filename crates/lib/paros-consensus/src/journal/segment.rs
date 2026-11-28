@@ -118,6 +118,33 @@ pub struct Hold {
     pub next_seq: Seq,
 }
 
+/// **The change of the replicas of the open segment** (D10 of §4.7): a
+/// command of the log that gives the tail segment a new [`ReplicaSet`]. It
+/// is a [`Command::SetReplicas`](crate::journal::Command::SetReplicas),
+/// proposed only by [`crate::ColocatedNode::set_replicas`], which refuses on
+/// a deployment with no matchmakers (D5): a plain deployment never decides
+/// one.
+///
+/// Judged at apply in slot order: it is valid when `segment` is the tail
+/// segment and `replicas` names no member that an earlier `SetReplicas` of
+/// the tail removed ([`crate::journal::JournalState::removed`]). A valid one
+/// gives the tail its `replicas` ([`crate::journal::JournalState::replicas`])
+/// and removes the members of the set before it that it leaves out. Any
+/// other changes nothing.
+/// A leader routes the `Commit` of each slot to the set that its fold gives
+/// at that slot, so the slot of the `SetReplicas` goes to the old set and
+/// every later slot to the new one (`Route = "fold"` of
+/// `specs/tla/segment-reseat/`). Like a `Roll` it consumes a slot and no
+/// position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SetReplicas {
+    /// The segment whose replicas change: valid only as the tail.
+    pub segment: SegmentId,
+    /// The replicas that keep the segment from the next slot.
+    pub replicas: ReplicaSet,
+}
+
 /// Where the tail segment of the log stands, as the fold of the chosen prefix
 /// gives it: its id and its first slot. Part of the journal state
 /// ([`crate::journal::JournalState::segment`]), so it is sealed at the floor

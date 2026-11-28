@@ -302,6 +302,13 @@ fn tlc_accepts_the_segment_replica_walks() {
     accepts(Spec::Matchmaker, &Flavor::segment_replicas());
 }
 
+/// The walks that change the replicas of the open segment: the same spec
+/// follows the votes and choices around a `SetReplicas`.
+#[test]
+fn tlc_accepts_the_segment_reseat_walks() {
+    accepts(Spec::Matchmaker, &Flavor::segment_reseat());
+}
+
 #[test]
 fn tlc_accepts_the_reconfigured_compartment_walks() {
     accepts(Spec::MatchmakerGrid, &Flavor::reconfiguring());

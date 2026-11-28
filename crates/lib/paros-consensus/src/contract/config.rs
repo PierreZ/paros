@@ -86,7 +86,15 @@ pub struct Config {
     /// matchmakers (R10, D5): a deployment without them routes nothing,
     /// whatever this names. Fixed when the journal is created and
     /// recorded in the format marker with the rest, so a restart never changes
-    /// it.
+    /// it. Every node and replica of a deployment holds the same set: the
+    /// fold reads it as the set that a `SetReplicas` of the first segment
+    /// replaces ([`crate::journal::JournalState::removed`]), so two nodes
+    /// that held two sets would fold two journals. With no set, the first
+    /// segment is kept by the pool, and the first `SetReplicas` of it
+    /// removes nobody: a replica that the new set leaves out is not moved,
+    /// and it stops only at the `Roll`. A later `SetReplicas` of the
+    /// segment removes the members of the set before it, as in any
+    /// segment.
     #[cfg_attr(feature = "serde", serde(default))]
     pub segment_replicas: Option<ReplicaSet>,
     /// The journal this node serves, named with its tenant (#184, #235):

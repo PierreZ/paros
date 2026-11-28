@@ -72,6 +72,17 @@
 //!   replicas of its segment hold it, and the acceptors may drop it. The
 //!   answer is a function of the chosen prefix, so every node gives it
 //!   (`OneAnswer` of `specs/tla/held-floor-hold/`).
+//! - **`SetReplicas(segment, replicas)`** ([`Command::SetReplicas`], D10 of
+//!   §4.7) gives the tail segment new replicas: it is valid iff `segment` is
+//!   the tail and names no member that an earlier `SetReplicas` of the tail
+//!   removed ([`JournalState::removed`]), and then
+//!   [`JournalState::replicas`] is the new set from the slot after it
+//!   ([`Outcome::Reseated`]), and the members of the set before it that the
+//!   new one leaves out join the removed ones. A `SetReplicas` of another
+//!   segment changes nothing ([`Outcome::ReseatIgnored`]), and nor does one
+//!   that names a removed member ([`Outcome::ReseatRemoved`]): a removed
+//!   member stopped at the `SetReplicas` that removed it, so it would keep
+//!   no slot after a second one that named it again.
 //!
 //! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
 //! carried by the store's sealed state and a trim-point jump, and never
@@ -90,8 +101,9 @@
 
 use crate::journal::{
     Command, Control, Entry, Hold, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+    SetReplicas,
 };
-use crate::types::Slot;
+use crate::types::{NodeId, Slot};
 
 /// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
 /// 2026-10-04): fixed when the journal is created, and never changed. The
@@ -134,7 +146,8 @@ pub struct JournalState {
     #[cfg_attr(feature = "serde", serde(default))]
     pub segment: Segment,
     /// The replicas of the tail segment that the last valid `Roll` naming a
-    /// set named (R6, D4 of §4.7): a `Roll` with no set keeps the set of the
+    /// set or the last valid `SetReplicas` named, whichever came later (R6,
+    /// D4 and D10 of §4.7): a `Roll` with no set keeps the set of the
     /// segment before it. `None` until a `Roll` named one: the replicas of
     /// the first segment, which the bootstrap configuration names
     /// ([`crate::contract::Config::segment_replicas`]), keep every segment
@@ -150,6 +163,17 @@ pub struct JournalState {
     /// state, so the floor seals it and a trim-point jump carries it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub held: Option<Hold>,
+    /// The members that a valid `SetReplicas` of the tail segment removed
+    /// (D10 of §4.7): each was in the set before it and is out of the set
+    /// after it. Disjoint from [`JournalState::replicas`], since a
+    /// `SetReplicas` that names one again is refused. `None` until a
+    /// `SetReplicas` of the tail removed a member; a valid `Roll` clears it.
+    /// A function of the chosen prefix like the rest of the state, so a
+    /// replica that the floor or a trim-point jump carried past the
+    /// `SetReplicas` still knows that its segment ended there
+    /// ([`crate::replica::Replica::moved_to`]), and a peer still serves it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub removed: Option<ReplicaSet>,
 }
 
 /// What a client learns of a journal's state (#241): the [`JournalState`]
@@ -218,6 +242,15 @@ pub enum Outcome {
     RollIgnored(Segment),
     /// A valid `Hold`: the held prefix after it.
     HeldTo(Hold),
+    /// A valid `SetReplicas`: the replicas of the tail segment after it.
+    Reseated(ReplicaSet),
+    /// A `SetReplicas` that does not name the tail segment: nothing moved.
+    /// The segment is the tail it was judged against.
+    ReseatIgnored(Segment),
+    /// A `SetReplicas` of the tail that names this member, which an earlier
+    /// `SetReplicas` of the tail removed ([`JournalState::removed`]):
+    /// nothing moved.
+    ReseatRemoved(NodeId),
     /// A `Hold` that does not extend the held prefix: nothing moved. It
     /// names the held prefix it was judged against.
     HoldIgnored(Option<Hold>),
@@ -244,7 +277,10 @@ impl JournalState {
     }
 
     /// Apply one decided `command`, chosen at `slot`, under the journal's
-    /// `mode`. `accepted_at(seq)` answers "which write was accepted with its first
+    /// `mode`. `first` is the bootstrap set of the first segment
+    /// ([`crate::contract::Config::segment_replicas`]), the set that a
+    /// `SetReplicas` replaces while [`JournalState::replicas`] is `None`;
+    /// every node of a deployment hands the same one. `accepted_at(seq)` answers "which write was accepted with its first
     /// record at `seq`?" for a single-writer retry below `next_seq`; it is
     /// only asked for a position at or above `first_seq`, and never on a
     /// multi-writer journal.
@@ -257,6 +293,7 @@ impl JournalState {
     pub fn apply<'a>(
         &mut self,
         mode: WriterMode,
+        first: Option<&ReplicaSet>,
         slot: Slot,
         command: &Command,
         accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
@@ -273,7 +310,7 @@ impl JournalState {
             );
         }
         let before = self.clone();
-        let outcome = self.judge(mode, slot, command, accepted_at);
+        let outcome = self.judge(mode, first, slot, command, accepted_at);
         self.assert_mode(mode, &outcome);
         self.assert_transition(&before, slot, &outcome);
         self.assert_invariants();
@@ -375,6 +412,8 @@ impl JournalState {
             | Outcome::Duplicate { .. }
             | Outcome::RollIgnored(_)
             | Outcome::HoldIgnored(_)
+            | Outcome::ReseatIgnored(_)
+            | Outcome::ReseatRemoved(_)
             | Outcome::Held(_)
             | Outcome::Noop => {
                 assert!(*self == *before, "a refused or no-op command moves nothing");
@@ -431,9 +470,10 @@ impl JournalState {
                 );
                 assert!(self.term == before.term, "a Roll keeps the term");
             }
-            Outcome::HeldTo(_) => {}
+            Outcome::HeldTo(_) | Outcome::Reseated(_) => {}
         }
         self.assert_held(before, outcome);
+        self.assert_replicas(before, outcome);
         // The refusals name the view they were judged against.
         if let Outcome::Refused(judged)
         | Outcome::Truncated(judged)
@@ -482,6 +522,71 @@ impl JournalState {
             );
             assert!(self.term == before.term, "a Hold keeps the term");
         }
+    }
+
+    /// The replicas' postconditions: only a valid `Roll` or a valid
+    /// `SetReplicas` moves them, a valid `SetReplicas` moves nothing else and
+    /// reports the set after it, and an ignored one names the tail it was
+    /// judged against.
+    fn assert_replicas(&self, before: &Self, outcome: &Outcome) {
+        if self.replicas != before.replicas {
+            assert!(
+                matches!(outcome, Outcome::Rolled(_) | Outcome::Reseated(_)),
+                "only a valid Roll or SetReplicas moves the replicas"
+            );
+        }
+        if let Outcome::Reseated(set) = outcome {
+            assert!(
+                self.replicas.as_ref() == Some(set),
+                "a valid SetReplicas reports the replicas after it"
+            );
+            assert!(
+                self.view() == before.view()
+                    && self.segment == before.segment
+                    && self.held == before.held,
+                "a SetReplicas moves no position, no leader, no segment and no held prefix"
+            );
+            assert!(self.term == before.term, "a SetReplicas keeps the term");
+        }
+        if let Outcome::ReseatIgnored(judged) = outcome {
+            assert!(
+                *judged == before.segment,
+                "an ignored SetReplicas names the tail it was judged against"
+            );
+        }
+        if let Outcome::ReseatRemoved(member) = outcome {
+            assert!(
+                before.removed.as_ref().is_some_and(|r| r.contains(*member)),
+                "a refused SetReplicas names a removed member"
+            );
+        }
+        if self.removed != before.removed {
+            assert!(
+                matches!(outcome, Outcome::Rolled(_) | Outcome::Reseated(_)),
+                "only a valid Roll or SetReplicas moves the removed members"
+            );
+        }
+        if matches!(outcome, Outcome::Rolled(_)) {
+            assert!(
+                self.removed.is_none(),
+                "a valid Roll clears the removed members"
+            );
+        }
+        if let Outcome::Reseated(_) = outcome {
+            // The removed members only grow inside a segment.
+            for member in before.removed.iter().flat_map(ReplicaSet::members) {
+                assert!(
+                    self.removed.as_ref().is_some_and(|r| r.contains(*member)),
+                    "a SetReplicas keeps every removed member removed"
+                );
+            }
+        }
+        // A removed member is never a replica of the tail: the set that a
+        // valid `SetReplicas` gives never names one.
+        assert!(
+            self.removed_apart(),
+            "a removed member is not a replica of the tail"
+        );
     }
 
     /// The tail segment's postconditions: it never goes back, only a valid
@@ -535,6 +640,7 @@ impl JournalState {
         if let Some(named) = &roll.replicas {
             self.replicas = Some(named.clone());
         }
+        self.removed = None;
         assert!(
             roll.replicas.is_none() || self.replicas == roll.replicas,
             "a valid Roll that names replicas gives them to the segment it opens"
@@ -594,6 +700,58 @@ impl JournalState {
         Outcome::HeldTo(hold)
     }
 
+    /// A `SetReplicas`: valid iff it names the tail segment (D10 of §4.7).
+    /// The fold of the chosen prefix is the same on every node, so every
+    /// node gives each slot the same set, and a leader routes the `Commit`
+    /// of a slot to the set that its fold gives there (`Route = "fold"` of
+    /// `specs/tla/segment-reseat/`; its control `route_proposed`, a route
+    /// by the proposed command, puts a slot at a replica that no chosen set
+    /// names).
+    fn apply_set_replicas(&mut self, set: &SetReplicas, first: Option<&ReplicaSet>) -> Outcome {
+        if set.segment != self.segment.id {
+            return Outcome::ReseatIgnored(self.segment);
+        }
+        if let Some(removed) = &self.removed
+            && let Some(member) = set
+                .replicas
+                .members()
+                .iter()
+                .find(|m| removed.contains(**m))
+        {
+            probe!(
+                reachable,
+                "journal: a SetReplicas that names a removed member is refused"
+            );
+            return Outcome::ReseatRemoved(*member);
+        }
+        probe!(
+            reachable,
+            "journal: a SetReplicas gives the tail new replicas"
+        );
+        // The set before it: the tail's own, else the bootstrap set of the
+        // first segment. A first segment with no bootstrap set is kept by
+        // every node of the pool, which no `SetReplicas` moves.
+        let old = self.replicas.as_ref().or(first);
+        let gone = old.into_iter().flat_map(ReplicaSet::members).copied();
+        let gone: Vec<NodeId> = gone
+            .filter(|m| !set.replicas.contains(*m))
+            .chain(self.removed.iter().flat_map(ReplicaSet::members).copied())
+            .collect::<std::collections::BTreeSet<NodeId>>()
+            .into_iter()
+            .collect();
+        self.removed = (!gone.is_empty()).then(|| ReplicaSet::new(gone));
+        self.replicas = Some(set.replicas.clone());
+        assert!(
+            self.replicas.as_ref() == Some(&set.replicas),
+            "a valid SetReplicas gives its set to the tail"
+        );
+        assert!(
+            set.segment == self.segment.id,
+            "a valid SetReplicas names the tail"
+        );
+        Outcome::Reseated(set.replicas.clone())
+    }
+
     /// The verdict on `command` under `mode`, the state moved accordingly.
     ///
     /// Proved in simulation (#241): a single-writer journal that takes an
@@ -604,6 +762,7 @@ impl JournalState {
     fn judge<'a>(
         &mut self,
         mode: WriterMode,
+        first: Option<&ReplicaSet>,
         slot: Slot,
         command: &Command,
         accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
@@ -612,6 +771,7 @@ impl JournalState {
             (_, Command::Control(Control::Noop)) => Outcome::Noop,
             (_, Command::Roll(roll)) => self.apply_roll(slot, roll),
             (_, Command::Hold(hold)) => self.apply_hold(*hold),
+            (_, Command::SetReplicas(set)) => self.apply_set_replicas(set, first),
             (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
                 Outcome::WrongMode(self.view())
             }
@@ -782,6 +942,20 @@ impl JournalState {
             && (self.segment.id == SegmentId::FIRST) == (self.segment.start == Slot(0))
             && self.segment.start.0 >= self.segment.id.0
             && self.held.is_none_or(|held| self.holds(held))
+            && self.removed_apart()
+    }
+
+    /// Whether no removed member is a replica of the tail, and a tail with
+    /// removed members has a set ([`JournalState::removed`]).
+    fn removed_apart(&self) -> bool {
+        match (&self.removed, &self.replicas) {
+            (Some(removed), Some(replicas)) => {
+                removed.members().iter().all(|m| !replicas.contains(*m))
+            }
+            // A `SetReplicas` that removed a member named the set after it.
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
     }
 
     /// Whether this state, sealed at a slot past `segment`, proves that every
@@ -840,6 +1014,10 @@ impl JournalState {
     /// held prefix does not fit the state (a held segment is sealed, and its
     /// end and position lie inside the fold).
     pub fn assert_invariants(&self) {
+        assert!(
+            self.removed_apart(),
+            "a removed member is never a replica of the tail"
+        );
         assert!(
             self.first_seq <= self.next_seq,
             "a journal's first position never passes its next one"

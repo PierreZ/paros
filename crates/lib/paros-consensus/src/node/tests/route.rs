@@ -293,3 +293,85 @@ fn a_slot_learned_twice_is_routed_at_the_ballot_of_its_commit() {
     routed.sort();
     assert_eq!(routed, [(s0, higher), (s1, higher)]);
 }
+
+/// A `SetReplicas` of the open segment (D10): the leader routes the slot
+/// of the `SetReplicas` to the old set, and each later slot to the new
+/// one, from its fold (`Route = "fold"` of `specs/tla/segment-reseat/`).
+/// One that names a segment the tail left changes nothing.
+#[test]
+fn a_set_replicas_routes_each_later_slot_to_the_new_set() {
+    use crate::journal::Outcome;
+    use crate::node::SetReplicasResult;
+    let old = ReplicaSet::new([NodeId(7), NodeId(8)]);
+    let new = ReplicaSet::new([NodeId(8), NodeId(9)]);
+    let (mut nodes, mut mms) = cluster_with_first(Some(&old), 3);
+    let queue = matchmade(&mut nodes, 0, &mut mms);
+    let mut routed = deliver_routed(&mut nodes, queue);
+    assert!(nodes[0].is_leader());
+    let SetReplicasResult::Accepted { slot: at, segment } = nodes[0].set_replicas(new.clone())
+    else {
+        panic!("the leader admits a SetReplicas");
+    };
+    assert_eq!(segment, SegmentId::FIRST, "it names the open tail");
+    nodes[0].propose(entry(1, 1, 10));
+    let queue = drain_routed(&mut nodes[0], &mut routed);
+    routed.extend(deliver_routed(&mut nodes, queue));
+    for n in &nodes {
+        assert_eq!(
+            n.replica().outcome_at(at),
+            Some(&Outcome::Reseated(new.clone()))
+        );
+        assert_eq!(n.replica().journal().replicas.as_ref(), Some(&new));
+    }
+    let at_set: Vec<_> = routed.iter().filter(|(.., slot)| *slot == at).collect();
+    assert_eq!(
+        at_set,
+        [&(NodeId(0), SegmentId::FIRST, old.clone(), at)],
+        "the SetReplicas itself goes to the old set"
+    );
+    let after: Vec<_> = routed.iter().filter(|(.., slot)| *slot > at).collect();
+    assert!(!after.is_empty(), "the write past it is routed");
+    assert!(
+        after.iter().all(|(_, _, set, _)| *set == new),
+        "every later slot goes to the new set"
+    );
+    assert!(
+        routed
+            .iter()
+            .filter(|(.., slot)| *slot < at)
+            .all(|(_, _, set, _)| *set == old),
+        "every earlier slot went to the old set"
+    );
+
+    // Past a `Roll`, a `SetReplicas` that the leader built on the old tail
+    // is ignored: the fold judges the segment it names.
+    let crate::node::RollResult::Accepted { slot: roll, .. } = nodes[0].roll(None) else {
+        panic!("the leader admits a roll");
+    };
+    let queue = drain_routed(&mut nodes[0], &mut routed);
+    routed.extend(deliver_routed(&mut nodes, queue));
+    assert_eq!(nodes[0].replica().journal().segment.id, SegmentId(1));
+    let stale = crate::journal::SetReplicas {
+        segment: SegmentId::FIRST,
+        replicas: old.clone(),
+    };
+    let ProposeResult::Accepted(late) =
+        nodes[0].propose_command_at(Command::SetReplicas(stale), crate::node::Delegation::Auto)
+    else {
+        panic!("the leader admits the command");
+    };
+    let queue = drain_routed(&mut nodes[0], &mut routed);
+    routed.extend(deliver_routed(&mut nodes, queue));
+    assert!(late > roll);
+    assert_eq!(
+        nodes[0].replica().outcome_at(late),
+        Some(&Outcome::ReseatIgnored(
+            nodes[0].replica().journal().segment
+        ))
+    );
+    assert_eq!(
+        nodes[0].replica().journal().replicas.as_ref(),
+        Some(&new),
+        "an ignored SetReplicas keeps the set"
+    );
+}

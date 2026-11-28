@@ -7,8 +7,8 @@ use consensus_sim::cluster::{Cluster, Flavor, Mutant};
 use consensus_sim::oracle::healed::{HEALED, NO_FALSE_SILENCE};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
-    CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND,
-    PREFIX_SHRINKS, ROUTE_ON_PREFIX, ROUTE_TRUE, TRIM_TRUE,
+    CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, MOVED_TRUE, ONE_PROPOSAL, ONE_VALUE,
+    PERSIST_BEFORE_SEND, PREFIX_SHRINKS, ROUTE_ON_PREFIX, ROUTE_TRUE, TRIM_TRUE,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -100,6 +100,16 @@ fn a_forged_release_in_a_trim_point_is_caught_by_the_trim_oracle() {
         Mutant::ForgeTrimRelease,
         400,
         TRIM_TRUE,
+    );
+}
+
+#[test]
+fn a_forged_removal_in_a_trim_point_is_caught_by_the_move_oracle() {
+    caught(
+        Flavor::segment_replicas(),
+        Mutant::ForgeMove,
+        400,
+        MOVED_TRUE,
     );
 }
 
