@@ -90,9 +90,11 @@ pub struct Config {
     /// fold reads it as the set that a `SetReplicas` of the first segment
     /// replaces ([`crate::journal::JournalState::removed`]), so two nodes
     /// that held two sets would fold two journals. With no set, the first
-    /// segment is kept by the pool, and a `SetReplicas` of it removes
-    /// nobody: a replica that the new set leaves out is not moved, and it
-    /// stops only at the `Roll`.
+    /// segment is kept by the pool, and the first `SetReplicas` of it
+    /// removes nobody: a replica that the new set leaves out is not moved,
+    /// and it stops only at the `Roll`. A later `SetReplicas` of the
+    /// segment removes the members of the set before it, as in any
+    /// segment.
     #[cfg_attr(feature = "serde", serde(default))]
     pub segment_replicas: Option<ReplicaSet>,
     /// The journal this node serves, named with its tenant (#184, #235):

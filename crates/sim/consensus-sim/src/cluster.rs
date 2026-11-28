@@ -553,22 +553,9 @@ impl Model for Cluster {
                         .trim_holds(&format!("replica {}", id.0), segment);
                 }
                 self.drain_replica(id, cx);
-                // A replica turns moved only at a step: a walk, a pull or a
-                // trim point that carries it past its removal.
-                if let Some(replica) = self.replica(id).live.as_ref()
-                    && replica.replica().is_moved()
-                    && !moved
-                {
-                    let segment = replica
-                        .replica()
-                        .segment_bound()
-                        .expect("a moved replica keeps a segment");
-                    let end = replica
-                        .replica()
-                        .ended_at()
-                        .expect("a moved replica has an end");
-                    self.ledger.moved_holds(id, segment, end);
-                }
+                // The step itself may carry the replica past its removal
+                // (a walk, a pull page or a trim point).
+                self.judge_move(id, moved);
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
             (Party::Matchmaker(id), Wire::Gc(request)) => self.gc_request(id, &request, cx),
@@ -1772,7 +1759,38 @@ impl Cluster {
         }
     }
 
+    /// Drain replica `id`, and judge its stop if it turned moved there: a
+    /// drain resumes a paged walk, after a tick, a read, a boot or a step.
     fn drain_replica(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
+        let moved = self
+            .replica(id)
+            .live
+            .as_ref()
+            .is_some_and(|r| r.replica().is_moved());
+        self.drain_replica_batches(id, cx);
+        self.judge_move(id, moved);
+    }
+
+    /// Oracle 13 ([`MOVED_TRUE`](crate::oracle::ledger::MOVED_TRUE)) on
+    /// replica `id`, when it is moved now and was not (`moved`) before.
+    fn judge_move(&mut self, id: NodeId, moved: bool) {
+        if let Some(replica) = self.replica(id).live.as_ref()
+            && replica.replica().is_moved()
+            && !moved
+        {
+            let segment = replica
+                .replica()
+                .segment_bound()
+                .expect("a moved replica keeps a segment");
+            let end = replica
+                .replica()
+                .ended_at()
+                .expect("a moved replica has an end");
+            self.ledger.moved_holds(id, segment, end);
+        }
+    }
+
+    fn drain_replica_batches(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let pool = self.pool.clone();
         // A replica pages its peers of a segment, which are replica sites.
         let replicas = self.replica_ids();
