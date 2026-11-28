@@ -69,9 +69,10 @@ pub(super) struct Controllers {
     /// The member that stopped for good when the faults stopped.
     pub(super) dead: Option<NodeId>,
     /// Each node that the driver started to retire, with the watermarks of
-    /// its `Retire` orders. Rule 6 orders no more once the node's mark is
-    /// checked, so the node's own driver keeps the order and calls
-    /// `may_retire` at each control round until the node retires.
+    /// its `Retire` orders. Rule 6 orders no more once the matchmakers
+    /// checked the node at the floor in force, so the node's own driver
+    /// keeps the order and calls `may_retire` at each control round until
+    /// the node retires.
     retiring: BTreeMap<NodeId, BTreeSet<Ballot>>,
 }
 

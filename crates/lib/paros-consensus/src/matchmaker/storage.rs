@@ -68,9 +68,7 @@ pub trait RegistryStorage {
 ///
 /// It is the read port ([`RegistryStorage`]) plus [`MemRegistry::apply`], the
 /// write side. It is *not* a storage engine: nothing rots, nothing tears, and
-/// [`MemRegistry::apply`] never fails. The `paros` crate's
-/// `MemMatchmakerStorage` mirrors it method for method behind the driver's
-/// fallible write extension.
+/// [`MemRegistry::apply`] never fails.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemRegistry {
     hard_state: MatchmakerHardState,
@@ -135,8 +133,18 @@ impl MemRegistry {
                 self.registry.insert(*ballot, registration.clone());
             }
             MatchmakerWriteOp::SetGcWatermark { watermark } => {
-                // The store keeps the higher of the two watermarks, so a
-                // lower or equal one changes nothing.
+                // The read half of the pair at the end of `apply`: the
+                // store already holds nothing below its watermark, so a
+                // lower or equal watermark changes nothing, and a bad boot
+                // image fails here and is not trimmed in silence.
+                assert!(
+                    self.registry
+                        .keys()
+                        .next()
+                        .is_none_or(|first| *first >= self.hard_state.gc_watermark()),
+                    "a persisted registry holds nothing below its watermark"
+                );
+                // The store keeps the higher of the two watermarks.
                 let raised = (*watermark).max(self.hard_state.gc_watermark());
                 self.hard_state.journal.gc_watermark = raised;
                 self.collect();
