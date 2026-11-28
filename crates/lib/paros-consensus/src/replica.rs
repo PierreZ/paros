@@ -239,6 +239,12 @@ pub struct Replica {
     /// The journal's writer mode (#241): configuration, fixed at creation,
     /// handed to every [`JournalState::apply`].
     mode: WriterMode,
+    /// The bootstrap set of the first segment
+    /// ([`crate::contract::Config::segment_replicas`]): configuration, the
+    /// same on every node, handed to every [`JournalState::apply`]. Boxed:
+    /// it is read only at a `SetReplicas`, and a node stays small on the
+    /// stack.
+    first_replicas: Option<Box<ReplicaSet>>,
     /// The most slots one walk releases (#338): a node tunable in
     /// `1..=APPLY_BATCH`, the constant by default
     /// ([`Replica::set_apply_page`]).
@@ -261,7 +267,8 @@ impl Replica {
     /// chosen index, the retention floor and the journal state sealed at it,
     /// and the retained accepted log (every record at or below the chosen
     /// index carries the chosen value — the P2c chain), under the journal's
-    /// writer `mode`.
+    /// writer `mode` and the bootstrap set `first_replicas` of the first
+    /// segment.
     ///
     /// The fold starts from the sealed state at the floor and replays the
     /// retained chosen records in slot order, stopping at the first one the
@@ -277,6 +284,7 @@ impl Replica {
     #[must_use]
     pub fn from_boot(
         mode: WriterMode,
+        first_replicas: Option<ReplicaSet>,
         chosen_index: Option<Slot>,
         floor: Slot,
         sealed: JournalState,
@@ -309,6 +317,7 @@ impl Replica {
             compaction_due: false,
             committed: Vec::new(),
             mode,
+            first_replicas: first_replicas.map(Box::new),
             apply_page: APPLY_BATCH,
             bound: None,
             member: None,
@@ -1331,13 +1340,17 @@ impl Replica {
     /// The replicas that a `SetReplicas` of the segment this replica keeps
     /// named without it (D10 of §4.7), once its fold applied it: the walk
     /// stops there, and a read at or past its position is
-    /// [`LogRead::Moved`]. The rule is a function of the fold, so a reboot or
-    /// a compaction past the `SetReplicas` keeps it. `None` for an unbound or
-    /// unnamed replica, and for a sealed one.
+    /// [`LogRead::Moved`]. The fold names the replica among the removed
+    /// members of the tail ([`JournalState::removed`]): a set that never
+    /// named it, as the boundary of a segment it joins before the
+    /// `SetReplicas` that adds it, does not move it. The rule is a function
+    /// of the fold, so a reboot or a compaction past the `SetReplicas` keeps
+    /// it. `None` for an unbound or unnamed replica, and for a sealed one.
     ///
     /// # Panics
     ///
-    /// If a moved replica is sealed too: a programmer error.
+    /// If the fold names the replica both removed and in the set: a broken
+    /// state, a programmer error.
     #[must_use]
     pub fn moved_to(&self) -> Option<&ReplicaSet> {
         let kept = self.bound?;
@@ -1345,11 +1358,18 @@ impl Replica {
         if self.state.segment.id != kept {
             return None;
         }
-        let set = self.state.replicas.as_ref()?;
-        if set.contains(member) {
+        if !self.state.removed.as_ref()?.contains(member) {
             return None;
         }
-        assert!(!self.is_sealed(), "a moved replica is not sealed");
+        let set = self
+            .state
+            .replicas
+            .as_ref()
+            .expect("a SetReplicas that removed a member named the set after it");
+        assert!(
+            !set.contains(member),
+            "a removed member is not in the set of its segment"
+        );
         Some(set)
     }
 
@@ -1432,7 +1452,13 @@ impl Replica {
         );
         let before = self.state.clone();
         let mut state = self.state.clone();
-        let outcome = state.apply(self.mode, slot, command, |seq| self.accepted_at(log, seq));
+        let outcome = state.apply(
+            self.mode,
+            self.first_replicas.as_deref(),
+            slot,
+            command,
+            |seq| self.accepted_at(log, seq),
+        );
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             // The index stays monotone: the head's write starts past every

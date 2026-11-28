@@ -67,7 +67,9 @@
 //!   boundary state the chain holds, with no record of an earlier segment.
 //!   A sealed replica answers a read past its end "sealed"
 //!   ([`LogRead::Sealed`](crate::replica::LogRead::Sealed),
-//!   [`ReplicaReady::sealed_reads`]). Its model is
+//!   [`ReplicaReady::ended_reads`]), and a replica that a `SetReplicas` of
+//!   its segment left out answers a read past it "moved"
+//!   ([`LogRead::Moved`](crate::replica::LogRead::Moved), D10). Its model is
 //!   `specs/tla/compartments/`. On a deployment that never rolls (every plain
 //!   one), the segment never ends.
 //! - **The reply:** [`AcceptorConfig::reply_owner`] names the one replica that owns
@@ -246,8 +248,9 @@ pub struct ReplicaNode {
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
     pending_read_states: Vec<ReadState>,
-    /// The confirmed reads this sealed replica answers "sealed" (R6).
-    pending_sealed_reads: Vec<ReadState>,
+    /// The confirmed reads that this replica answers "sealed" (R6) or
+    /// "moved" (D10): its segment ended before their index.
+    pending_ended_reads: Vec<ReadState>,
     counters: ReplicaCounters,
     /// The lowest slot a `CatchUpRequest` of this replica asked from since
     /// its last trim-point jump: a `TrimmedTo` is taken only when it answers
@@ -334,6 +337,7 @@ impl ReplicaNode {
         }
         let mut replica = Replica::from_boot(
             config.writer_mode,
+            config.segment_replicas.clone(),
             chosen_index,
             floor,
             storage.sealed_state(),
@@ -361,7 +365,7 @@ impl ReplicaNode {
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_read_states: Vec::new(),
-            pending_sealed_reads: Vec::new(),
+            pending_ended_reads: Vec::new(),
             counters: ReplicaCounters::default(),
             catchup_asked: None,
             peer_turn: 0,
@@ -453,7 +457,7 @@ impl ReplicaNode {
                 }
             }
             // A peer of the segment pulls what the acceptors dropped (R8).
-            Message::CatchUpRequest { from, from_slot } if self.is_segment_peer(from) => {
+            Message::CatchUpRequest { from, from_slot } if self.serves_pull_of(from) => {
                 self.serve_peer(from, from_slot);
             }
             Message::CatchUpResponse { from, entries } => {
@@ -811,19 +815,19 @@ impl ReplicaNode {
     /// the next segment for the rest.
     fn serve_quorum_reads(&mut self) {
         let replica = &self.replica;
-        let sealed = replica.is_sealed();
+        let ended = replica.has_ended();
         let served = self
             .quorum_reads
-            .serve(|index| sealed || replica.covers(index));
+            .serve(|index| ended || replica.covers(index));
         for (ctx, index) in served {
             if self.replica.covers(index) {
                 self.pending_read_states.push(ReadState { ctx, index });
             } else {
                 assert!(
-                    sealed,
-                    "only a sealed replica answers a read it does not cover"
+                    ended,
+                    "only a replica whose segment ended answers a read it does not cover"
                 );
-                self.pending_sealed_reads.push(ReadState { ctx, index });
+                self.pending_ended_reads.push(ReadState { ctx, index });
             }
         }
         // The apply condition: this replica's own fold covers every read it
@@ -856,14 +860,15 @@ impl ReplicaNode {
         );
         self.retained_bytes -= dropped;
         // A faulty record lies inside the durable chosen prefix (the boot
-        // reads only those), and a sealed replica's prefix ends at its end.
+        // reads only those), and the prefix of a replica whose segment
+        // ended stops at its end.
         assert!(
             self.faulty.last().is_none_or(|s| *s < end),
-            "a sealed replica holds no faulty record past its end"
+            "a replica whose segment ended holds no faulty record past its end"
         );
         assert!(
             self.records.last_key_value().is_none_or(|(s, _)| *s < end),
-            "a sealed replica holds no record past its end"
+            "a replica whose segment ended holds no record past its end"
         );
     }
 
@@ -952,8 +957,8 @@ impl ReplicaNode {
             self.counters.ignored += 1;
             return;
         }
-        // A trim point of another segment, or one a sealed replica does not
-        // need, would carry this replica out of the segment it keeps (R6).
+        // A trim point of another segment, or one that a replica whose
+        // segment ended (sealed or moved) does not need, would carry this replica out of the segment it keeps (R6).
         if self.replica.has_ended() || Some(state.segment.id) != self.replica.segment_bound() {
             self.counters.past_end += 1;
             // A lagging replica of a segment that a `Truncate` released gets
@@ -1084,28 +1089,36 @@ impl ReplicaNode {
         self.catchup_asked
     }
 
-    /// The other replicas of the segment this replica keeps (R8): the set
-    /// that its own fold gives the segment at its head (the `Roll` that
-    /// opened the segment, or a later `SetReplicas` of it, D10), at the
-    /// `Roll` that ends it once sealed, else the bootstrap set of the first
-    /// segment. So a new member that has not walked the `SetReplicas` yet
-    /// pulls from the old set, whose members hold every slot up to it, and
-    /// from the new set once it walked it. Empty when it keeps no segment.
-    fn segment_peers(&self) -> Vec<NodeId> {
-        if self.replica.segment_bound().is_none() {
-            return Vec::new();
-        }
-        let head = match self.replica.sealed_end() {
-            // The state that the `Roll` was judged in: the set of the
-            // segment at its end, never the set of the next one.
+    /// The state that names the replicas of the segment this replica keeps:
+    /// the head of its own fold, or the state that the `Roll` that ends the
+    /// segment was judged in once sealed (the set of the segment at its
+    /// end, never the set of the next one). `None` when it keeps no
+    /// segment.
+    fn segment_state(&self) -> Option<JournalState> {
+        self.replica.segment_bound()?;
+        let state = match self.replica.sealed_end() {
             Some(end) => self.replica.journal_at(Slot(end.0 - 1)),
             None => self.replica.journal(),
         };
         assert!(
-            Some(head.segment.id) == self.replica.segment_bound(),
+            Some(state.segment.id) == self.replica.segment_bound(),
             "the peers come from a state of the segment this replica keeps"
         );
-        let set = head
+        Some(state)
+    }
+
+    /// The other replicas of the segment this replica keeps (R8): the set
+    /// that its own fold gives the segment ([`ReplicaNode::segment_state`]:
+    /// the `Roll` that opened the segment, or a later `SetReplicas` of it,
+    /// D10), else the bootstrap set of the first segment. So a new member
+    /// that has not walked the `SetReplicas` yet pulls from the old set,
+    /// whose members hold every slot up to it, and from the new set once it
+    /// walked it. Empty when it keeps no segment.
+    fn segment_peers(&self) -> Vec<NodeId> {
+        let Some(state) = self.segment_state() else {
+            return Vec::new();
+        };
+        let set = state
             .replicas
             .as_ref()
             .or(self.config.segment_replicas.as_ref());
@@ -1130,6 +1143,28 @@ impl ReplicaNode {
             "a replica is never its own peer"
         );
         peer
+    }
+
+    /// Whether this replica serves a pull of `id` (R8, D10): a peer of its
+    /// segment, or a member that a `SetReplicas` of the segment removed
+    /// ([`JournalState::removed`]). A removed member that lags still pulls
+    /// up to the `SetReplicas` that ends its segment, from the set it
+    /// walked, whose members may have walked past it.
+    pub(crate) fn serves_pull_of(&self, id: NodeId) -> bool {
+        if self.is_segment_peer(id) {
+            return true;
+        }
+        let removed = self
+            .segment_state()
+            .and_then(|state| state.removed)
+            .is_some_and(|removed| removed.contains(id))
+            && id != self.config.id;
+        probe!(
+            sometimes,
+            removed,
+            "replica: a peer serves a member that a SetReplicas removed"
+        );
+        removed
     }
 
     /// Pull the slots this replica misses from the next replica peer of
@@ -1737,7 +1772,7 @@ impl ReplicaNode {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_read_states.clear();
-        self.pending_sealed_reads.clear();
+        self.pending_ended_reads.clear();
         self.replica.clear_committed();
         assert!(
             self.pending_writes.is_empty(),

@@ -143,6 +143,22 @@ impl Ledger {
         }
     }
 
+    /// Name the bootstrap set of the first segment
+    /// (`Config::segment_replicas`), before the first slot is judged: the
+    /// journal contract needs the set that a `SetReplicas` of the first
+    /// segment replaces.
+    ///
+    /// # Panics
+    ///
+    /// If the ledger judged a slot already.
+    pub fn set_first_replicas(&mut self, first: Option<&paros_consensus::journal::ReplicaSet>) {
+        assert!(
+            self.journal.folded() == 0,
+            "the first set is named before any slot"
+        );
+        self.journal = JournalSpec::new(first);
+    }
+
     /// The rule a vote at `ballot` is judged with: the configuration a
     /// matchmaker registered for it, or the static one.
     #[must_use]

@@ -413,6 +413,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
             segment: crate::journal::Segment::default(),
             replicas: None,
             held: None,
+            removed: None,
         },
         first_seq: crate::journal::Seq(0),
     });

@@ -88,18 +88,14 @@ impl ColocatedNode {
         let rejoin = boot_rejoin(&config, retire_mark);
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
-        let mut replica = Replica::from_boot(
-            config.writer_mode,
+        let replica = boot_learner(
+            &config,
             hard_state.chosen_index,
             first_slot,
             storage.sealed_state(),
             &accepted,
+            limits,
         );
-        replica.set_apply_page(limits.apply_page);
-        // The node's learner keeps the whole log, and the replicas of a held
-        // segment hold it whole: its records go at the fold of the `Hold`.
-        // The plain arm never folds a `Hold`, so this changes nothing there.
-        replica.set_held_records(HeldRecords::Drop);
 
         // Next free slot: one past the highest accepted entry (readable or
         // faulty), or (when the log is empty, e.g. fully truncated) one past
@@ -217,6 +213,36 @@ impl ColocatedNode {
         );
         self.assert_invariants();
     }
+}
+
+/// The node's learner, folded from what the boot read back under the
+/// deployment's writer mode and bootstrap set of the first segment. It
+/// keeps the whole log, and the replicas of a held segment hold it whole:
+/// its records go at the fold of the `Hold`. The plain arm never folds a
+/// `Hold`, so this changes nothing there.
+fn boot_learner(
+    config: &Config,
+    chosen_index: Option<Slot>,
+    first_slot: Slot,
+    sealed: crate::journal::JournalState,
+    accepted: &BTreeMap<Slot, (Ballot, Command)>,
+    limits: Limits,
+) -> Replica {
+    let mut replica = Replica::from_boot(
+        config.writer_mode,
+        config.segment_replicas.clone(),
+        chosen_index,
+        first_slot,
+        sealed,
+        accepted,
+    );
+    replica.set_apply_page(limits.apply_page);
+    replica.set_held_records(HeldRecords::Drop);
+    assert!(
+        replica.segment_bound().is_none(),
+        "a node's learner keeps the whole log"
+    );
+    replica
 }
 
 /// Read half of the registration fence pair (#1002 (retire fence gaps)): a

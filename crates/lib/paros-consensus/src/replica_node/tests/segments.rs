@@ -329,7 +329,7 @@ fn a_sealed_replica_answers_a_read_past_its_end_sealed() {
     }
     let ready = replica.ready();
     assert_eq!(
-        ready.sealed_reads(),
+        ready.ended_reads(),
         &[ReadState {
             ctx: 1,
             index: Some(Slot(5))
@@ -345,7 +345,7 @@ fn a_sealed_replica_answers_a_read_past_its_end_sealed() {
     assert!(!ready.is_empty());
     ready.advance();
     let ready = replica.ready();
-    assert_eq!(ready.sealed_reads(), [], "an advanced batch is gone");
+    assert_eq!(ready.ended_reads(), [], "an advanced batch is gone");
     ready.advance();
 }
 
@@ -367,7 +367,7 @@ fn an_open_replica_holds_a_read_past_its_prefix() {
         });
     }
     let ready = replica.ready();
-    assert_eq!(ready.sealed_reads(), []);
+    assert_eq!(ready.ended_reads(), []);
     assert_eq!(ready.read_states(), []);
     ready.advance();
 }
@@ -961,7 +961,7 @@ fn a_replica_that_a_set_replicas_leaves_out_stops_and_answers_moved() {
         fence: None,
         gc_floor: None,
     };
-    let mut disk = MemStorage::new(multi());
+    let mut disk = MemStorage::new(peer_config(10));
     let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
     replica.step(commit(0, write(7)));
     replica.step(commit(2, write(8)));
@@ -1089,4 +1089,123 @@ fn the_peers_of_a_replica_are_the_set_its_fold_gives_its_segment() {
         1,
         "a member of the set at the end is served"
     );
+}
+
+/// A replica that joins a later segment from a boundary whose set does not
+/// name it is not moved (D10): no `SetReplicas` of the segment removed it.
+/// It walks the `SetReplicas` that adds it and keeps the segment after it.
+#[test]
+fn a_joined_replica_that_its_boundary_set_leaves_out_is_not_moved() {
+    let mut disk = MemStorage::new(peer_config(10));
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    let boundary = JournalState {
+        replicas: Some(crate::journal::ReplicaSet::new([NodeId(11), NodeId(12)])),
+        ..boundary()
+    };
+    assert_eq!(replica.join_segment(Slot(2), boundary), Ok(()));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(!replica.replica().has_ended(), "a joiner is not moved");
+    replica.step(commit(2, set_replicas(1, &[10, 11])));
+    replica.step(commit(3, write(8)));
+    assert_eq!(drain(&mut replica, &mut disk), vec![Slot(2), Slot(3)]);
+    assert!(!replica.replica().has_ended());
+    let LogRead::Page(page) = replica.read_log(Seq(1), 10, usize::MAX) else {
+        panic!("a read of the joined segment is a page");
+    };
+    assert_eq!(page.records, vec![Value::from(vec![8])]);
+    // A second `SetReplicas` that removes it moves it, and a reboot keeps it.
+    replica.step(commit(4, set_replicas(1, &[11, 13])));
+    replica.step(commit(5, write(9)));
+    assert_eq!(drain(&mut replica, &mut disk), vec![Slot(4)]);
+    assert!(replica.replica().is_moved());
+    let rebooted = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert!(rebooted.replica().is_moved());
+}
+
+/// A peer that walked the `SetReplicas` that removed a member still serves
+/// that member's pull (D10, `CatchUp` of `specs/tla/segment-reseat/`): the
+/// removed member that lags pulls up to the `SetReplicas` from the set it
+/// walked. A node that no set of the segment named gets nothing.
+#[test]
+fn a_peer_serves_a_member_that_a_set_replicas_removed() {
+    let mut disk = MemStorage::new(peer_config(11));
+    let mut peer = ReplicaNode::new(&disk, Limits::DEFAULT);
+    peer.step(commit(0, write(7)));
+    peer.step(commit(1, set_replicas(0, &[11, 12])));
+    peer.step(commit(2, write(8)));
+    let _ = drain(&mut peer, &mut disk);
+    assert_eq!(
+        page_from(&mut peer, &mut disk, 0),
+        vec![Slot(0), Slot(1), Slot(2)],
+        "the removed member 10 is served"
+    );
+    peer.step(Message::CatchUpRequest {
+        from: NodeId(13),
+        from_slot: Slot(0),
+    });
+    assert_eq!(
+        sent(&mut peer, &mut disk),
+        Vec::new(),
+        "a node that no set named is not served"
+    );
+    // The lagging member learns the `SetReplicas` from the page and stops
+    // there.
+    let mut lag_disk = MemStorage::new(peer_config(10));
+    let mut lagging = ReplicaNode::new(&lag_disk, Limits::DEFAULT);
+    lagging.step(Message::CatchUpResponse {
+        from: NodeId(11),
+        entries: [0, 1, 2]
+            .into_iter()
+            .map(|s| {
+                let command = peer.chosen_at(Slot(s)).expect("the peer holds it").clone();
+                let ballot = Ballot {
+                    round: 1,
+                    node: NodeId(0),
+                };
+                (Slot(s), (ballot, command))
+            })
+            .collect(),
+    });
+    assert_eq!(drain(&mut lagging, &mut lag_disk), vec![Slot(0), Slot(1)]);
+    assert!(lagging.replica().is_moved());
+}
+
+/// A moved replica answers a confirmed quorum read past its end "moved"
+/// (D10), as a sealed one answers "sealed", and one inside its segment with
+/// a state.
+#[test]
+fn a_moved_replica_answers_a_quorum_read_past_its_end() {
+    let mut disk = MemStorage::new(peer_config(10));
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    replica.step(commit(1, set_replicas(0, &[11, 12])));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(replica.replica().is_moved());
+    let ack = |from: u64, ctx: u64, watermark: u64| Message::PreReadAck {
+        from: NodeId(from),
+        ctx,
+        watermark: Some(Slot(watermark)),
+        config_since: None,
+    };
+    for (ctx, watermark) in [(1, 5), (2, 1)] {
+        assert_eq!(replica.quorum_read_in(ctx, None), ReadOpen::Opened);
+        replica.step(ack(0, ctx, watermark));
+        replica.step(ack(1, ctx, watermark));
+    }
+    let ready = replica.ready();
+    assert_eq!(
+        ready.ended_reads(),
+        &[ReadState {
+            ctx: 1,
+            index: Some(Slot(5))
+        }]
+    );
+    assert_eq!(
+        ready.read_states(),
+        &[ReadState {
+            ctx: 2,
+            index: Some(Slot(1))
+        }]
+    );
+    ready.advance();
 }

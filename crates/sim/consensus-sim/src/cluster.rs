@@ -107,6 +107,12 @@ pub mod reach {
     /// A replica that a `SetReplicas` added sealed the whole segment (D10).
     pub const RESEAT_JOINED: &str =
         "cluster: a replica that a SetReplicas added sealed its segment";
+    /// The first site slept through the `SetReplicas` that removed it, and
+    /// stopped there once it caught up (D10).
+    pub const RESEAT_LAGGED: &str = "cluster: a removed sleeper stopped at its SetReplicas";
+    /// A `SetReplicas` named again a member that an earlier one removed, and
+    /// the journal refused it (D10).
+    pub const RESEAT_REFUSED: &str = "cluster: a SetReplicas naming a removed member was refused";
     /// A majority of the matchmakers holds a node's publish of the end of a
     /// segment (R5): the chain grows.
     pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
@@ -360,6 +366,11 @@ pub struct Cluster {
     /// named, as a node applied it: a site that no set of its segment named
     /// keeps nothing, so the liveness judge asks nothing of it.
     reseated: BTreeSet<NodeId>,
+    /// Whether the first replica site, the one that the `SetReplicas` of
+    /// [`LastSite::Added`](crate::cluster::flavor::LastSite::Added) removes,
+    /// sleeps until the settle rounds too: then it lags through its removal
+    /// and pulls up to it from the acceptors or its peers.
+    first_sleeps: bool,
     /// The reconfigurations the operator asked for: each ballot and the
     /// members it names.
     asked: Vec<(Ballot, Vec<NodeId>)>,
@@ -859,6 +870,7 @@ impl Cluster {
             decree_rounds: Vec::new(),
             retired: BTreeSet::new(),
             reseated: BTreeSet::new(),
+            first_sleeps: flavor.last_site.reseats() && cx.rng().chance(1, 2),
             asked: Vec::new(),
             checking: None,
             admitted: BTreeMap::new(),
@@ -868,6 +880,8 @@ impl Cluster {
             pool,
             flavor,
         };
+        let first = cluster.party_config(NodeId(0)).segment_replicas;
+        cluster.ledger.set_first_replicas(first.as_ref());
         cluster.decree_rounds = vec![0; cluster.pool.len()];
         cluster.reconfigurers = cluster
             .pool
@@ -885,10 +899,13 @@ impl Cluster {
                 ReplicaSite::new(id, cluster.party_config(id), cluster.flavor.limits)
             })
             .collect();
+        let sleepers: Vec<NodeId> = cluster
+            .replica_ids()
+            .into_iter()
+            .filter(|id| cluster.is_sleeper(*id))
+            .collect();
         for site in &mut cluster.replicas {
-            if cluster.flavor.last_site.sleeps()
-                && site.id.0 + 1 == REPLICA_BASE + cluster.flavor.replicas
-            {
+            if sleepers.contains(&site.id) {
                 site.live = None;
             }
         }
@@ -1108,7 +1125,9 @@ impl Cluster {
     /// Whether `id` is the replica site that [`LastSite::Sleeper`](crate::cluster::flavor::LastSite) keeps down
     /// until the settle rounds.
     fn is_sleeper(&self, id: NodeId) -> bool {
-        self.flavor.last_site.sleeps() && id.0 + 1 == REPLICA_BASE + self.flavor.replicas
+        let last =
+            self.flavor.last_site.sleeps() && id.0 + 1 == REPLICA_BASE + self.flavor.replicas;
+        last || (self.first_sleeps && id.0 == REPLICA_BASE)
     }
 
     fn replica(&self, id: NodeId) -> &ReplicaSite {
@@ -1668,6 +1687,10 @@ impl Cluster {
         {
             self.reseated.extend(set.members().iter().copied());
         }
+        sometimes!(
+            matches!(outcome, Outcome::ReseatRemoved(_)),
+            reach::RESEAT_REFUSED
+        );
         let before = self.ledger.applied(who, slot, command, outcome);
         self.reads.applied(slot);
         if let Some(event) = self.tracer.fold(slot, outcome) {
@@ -1758,6 +1781,7 @@ impl Cluster {
             let added = self.flavor.last_site.reseats()
                 && id.0 + 1 == REPLICA_BASE + self.flavor.replicas
                 && self.reseated.contains(&id);
+            let lagged = self.first_sleeps && id.0 == REPLICA_BASE;
             let site = self.replica_mut(id);
             let Some(replica) = site.live.as_mut() else {
                 return;
@@ -1777,6 +1801,7 @@ impl Cluster {
             ready.advance();
             sometimes!(replica.is_trimmed(), reach::REPLICA_TRIMMED);
             sometimes!(replica.replica().is_moved(), reach::RESEAT_MOVED);
+            sometimes!(lagged && replica.replica().is_moved(), reach::RESEAT_LAGGED);
             sometimes!(added && replica.replica().is_sealed(), reach::RESEAT_JOINED);
             let open = !replica.replica().is_sealed() && !replica.is_trimmed();
             sometimes!(open && past, reach::PEER_ONLY);
@@ -2059,14 +2084,16 @@ impl Cluster {
 
     /// The operator replaces the first replica site of the first segment by
     /// the last one ([`LastSite::Added`](crate::cluster::flavor::LastSite::Added)), at a leader whose fold stands in
-    /// the first segment. The target is always the same set, so a second
-    /// admitted `SetReplicas` never adds back the site that the first one
-    /// removed.
+    /// the first segment, or, half the time, names every site: before the
+    /// removal that only adds the last site, and after it the journal
+    /// refuses it, since it names the removed site again.
     fn set_replicas(&mut self, cx: &mut Cx<'_, Self>) {
         let Some(leader) = self.pick_leader(cx) else {
             return;
         };
-        let target = ReplicaSet::new((1..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)));
+        let from = u64::from(cx.rng().chance(1, 2));
+        let target =
+            ReplicaSet::new((from..self.flavor.replicas).map(|i| NodeId(REPLICA_BASE + i)));
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
         if node.replica().journal().segment.id != paros_consensus::journal::SegmentId::FIRST {
             return;
@@ -2876,6 +2903,7 @@ fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
     // it, for the same reason: the walks that send one digest as they did
     // before the field existed, and a head that says more is judged.
     let text = format!("{batch:?}")
+        .replace(", removed: None }", " }")
         .replace(", held: None }", " }")
         .replace(", replicas: None }", " }");
     let text = without_trim_first_seq(&text);

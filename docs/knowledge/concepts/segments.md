@@ -173,7 +173,10 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   segment again at each new version; a removed replica keeps its copy until then. The
   `SetReplicas` of the open segment is built (`Command::SetReplicas`,
   `ColocatedNode::set_replicas`): the leader routes each later slot to the new set, a removed
-  replica stops at it and answers a read above it `LogRead::Moved`, and the tally counts the
+  replica stops at it and answers a read above it `LogRead::Moved`, the fold keeps the removed
+  members of the tail (`JournalState::removed`) so that only a removed member stops, a
+  `SetReplicas` that names one again is refused (`Outcome::ReseatRemoved`), a peer still
+  serves the pull of a removed member that lags, and the tally counts the
   set that the fold gives at the `Roll`, which is final then. The version stamp comes with the
   heal of a sealed segment, which is not built.
 

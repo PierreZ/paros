@@ -126,6 +126,8 @@ fn segment_reseat() {
             reach::RESEAT_ADMITTED,
             reach::RESEAT_MOVED,
             reach::RESEAT_JOINED,
+            reach::RESEAT_LAGGED,
+            reach::RESEAT_REFUSED,
         ],
     );
 }

@@ -232,9 +232,11 @@ Test only: `publish = false`, never a dependency of another crate.
   liveness judge takes a sealed replica as done at its end and a trimmed one as done), the same
   walk with four replica sites (`segment-reseat`, `LastSite::Added`: the first three are the
   replicas of the first segment, the last sleeps until the settle rounds, and a quarter of the
-  proposals are the `SetReplicas` that replaces the first site by the last, while the leader's
-  tail is the first segment; it must reach an admitted `SetReplicas`, a removed replica that
-  stops there and an added one that seals its segment; the liveness judge takes a removed replica
+  proposals are a `SetReplicas` while the leader's tail is the first segment: half replace the
+  first site by the last, half name every site (refused once the first site is removed); in half
+  the seeds the first site sleeps through its removal too; it must reach an admitted
+  `SetReplicas`, a removed replica that stops there, a removed sleeper that stops there, a
+  refused `SetReplicas` and an added replica that seals its segment; the liveness judge takes a removed replica
   as done at its stop, and asks nothing of a site that no set of its segment named), and the journal controller (`healing`: matchmakers,
   three spares and two controllers; a member stops for good at the calm, and the controllers
   replace it and retire the spare that leaves; the operator makes no move). 60 seeds each in CI; `lagging-reads`
