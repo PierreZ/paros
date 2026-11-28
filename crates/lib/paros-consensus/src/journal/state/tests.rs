@@ -716,3 +716,96 @@ fn a_state_releases_a_segment_only_with_its_writes_below_first_seq() {
     assert!(at(3, 9, 0, Some(hold(1, 5))).releases(SegmentId(1), Seq(5)));
     assert!(!at(3, 9, 0, Some(hold(1, 5))).releases(SegmentId(2), Seq(5)));
 }
+
+/// A `SetReplicas` of the tail gives it its set (D10), under both writer
+/// modes, and moves nothing else; one of another segment is ignored and
+/// names the tail. A later `Roll` with no set keeps the new set.
+#[test]
+fn a_set_replicas_of_the_tail_gives_it_its_set_and_any_other_is_ignored() {
+    use crate::journal::segment::{ReplicaSet, SetReplicas};
+    let set = |segment: u64, members: &[u64]| {
+        Command::SetReplicas(SetReplicas {
+            segment: SegmentId(segment),
+            replicas: ReplicaSet::new(members.iter().copied().map(NodeId)),
+        })
+    };
+    let named = ReplicaSet::new([NodeId(3), NodeId(4)]);
+    for mode in [WriterMode::Single, WriterMode::Multi] {
+        let mut state = JournalState::default();
+        let before = state.clone();
+        let ignored = state.apply(mode, Slot(0), &set(1, &[5]), |_| None);
+        assert_eq!(ignored, Outcome::ReseatIgnored(Segment::default()));
+        assert_eq!(state, before, "an ignored SetReplicas moves nothing");
+        let valid = state.apply(mode, Slot(1), &set(0, &[3, 4]), |_| None);
+        assert_eq!(valid, Outcome::Reseated(named.clone()));
+        assert_eq!(state.replicas.as_ref(), Some(&named));
+        assert_eq!(
+            JournalState {
+                replicas: None,
+                ..state.clone()
+            },
+            before,
+            "a SetReplicas moves only the set"
+        );
+        let _ = state.apply(mode, Slot(2), &roll(1), |_| None);
+        assert_eq!(
+            state.replicas.as_ref(),
+            Some(&named),
+            "a Roll with no set keeps it"
+        );
+        let overtaken = state.apply(mode, Slot(3), &set(0, &[5]), |_| None);
+        assert_eq!(overtaken, Outcome::ReseatIgnored(state.segment));
+        assert_eq!(state.replicas.as_ref(), Some(&named));
+    }
+}
+
+/// A `SetReplicas` that reports another set than the one after it, or an
+/// ignored one that names another tail, is a bug; and only a `Roll` or a
+/// `SetReplicas` moves the set.
+#[test]
+#[should_panic(expected = "a valid SetReplicas reports the replicas after it")]
+fn a_set_replicas_that_reports_another_set_is_a_bug() {
+    use crate::journal::segment::ReplicaSet;
+    let after = JournalState {
+        replicas: Some(ReplicaSet::new([NodeId(1)])),
+        ..JournalState::default()
+    };
+    after.assert_replicas(
+        &JournalState::default(),
+        &Outcome::Reseated(ReplicaSet::new([NodeId(2)])),
+    );
+}
+
+#[test]
+#[should_panic(expected = "an ignored SetReplicas names the tail it was judged against")]
+fn an_ignored_set_replicas_that_names_another_tail_is_a_bug() {
+    let other = Segment::default().rolled_at(Slot(4));
+    JournalState::default()
+        .assert_replicas(&JournalState::default(), &Outcome::ReseatIgnored(other));
+}
+
+#[test]
+#[should_panic(expected = "only a valid Roll or SetReplicas moves the replicas")]
+fn a_set_that_moves_without_a_roll_or_set_replicas_is_a_bug() {
+    use crate::journal::segment::ReplicaSet;
+    let after = JournalState {
+        replicas: Some(ReplicaSet::new([NodeId(1)])),
+        ..JournalState::default()
+    };
+    after.assert_replicas(&JournalState::default(), &Outcome::Noop);
+}
+
+#[test]
+#[should_panic(
+    expected = "a SetReplicas moves no position, no leader, no segment and no held prefix"
+)]
+fn a_set_replicas_that_moves_a_position_is_a_bug() {
+    use crate::journal::segment::ReplicaSet;
+    let set = ReplicaSet::new([NodeId(1)]);
+    let after = JournalState {
+        replicas: Some(set.clone()),
+        next_seq: Seq(1),
+        ..JournalState::default()
+    };
+    after.assert_replicas(&JournalState::default(), &Outcome::Reseated(set));
+}

@@ -934,3 +934,159 @@ fn a_join_drops_the_pull_of_the_segment_it_leaves() {
         "a join keeps no pull of the segment it leaves: {out:?}"
     );
 }
+
+fn set_replicas(segment: u64, members: &[u64]) -> Command {
+    Command::SetReplicas(crate::journal::SetReplicas {
+        segment: SegmentId(segment),
+        replicas: crate::journal::ReplicaSet::new(members.iter().copied().map(NodeId)),
+    })
+}
+
+/// A `SetReplicas` of its segment that leaves this replica out ends the
+/// segment for it (D10, `Out` of `specs/tla/segment-reseat/`): the walk
+/// stops after it, a slot past it is not this replica's, a read at or
+/// past its position is answered "moved" with the new set, the replica
+/// pulls nothing more, and a reboot keeps all of it. It reports nothing
+/// held: it does not hold the segment whole.
+#[test]
+fn a_replica_that_a_set_replicas_leaves_out_stops_and_answers_moved() {
+    let beat = Message::Heartbeat {
+        from: NodeId(0),
+        ballot: Ballot {
+            round: 1,
+            node: NodeId(0),
+        },
+        commit: Some(Slot(9)),
+        config: None,
+        fence: None,
+        gc_floor: None,
+    };
+    let mut disk = MemStorage::new(multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    replica.step(commit(2, write(8)));
+    replica.step(commit(1, set_replicas(0, &[11, 12])));
+    assert_eq!(drain(&mut replica, &mut disk), vec![Slot(0), Slot(1)]);
+    assert!(replica.replica().is_moved());
+    assert!(
+        !replica.replica().is_sealed(),
+        "a moved replica is not sealed"
+    );
+    assert_eq!(replica.replica().ended_at(), Some(Slot(2)));
+    assert_eq!(replica.chosen_at(Slot(2)), None, "slot 2 is not its own");
+    assert_eq!(replica.retained_bytes(), 1);
+    replica.step(commit(3, write(9)));
+    assert_eq!(drain(&mut replica, &mut disk), Vec::<Slot>::new());
+    assert_eq!(replica.counters().past_end, 1);
+    let moved = LogRead::Moved {
+        end: Seq(1),
+        replicas: crate::journal::ReplicaSet::new([NodeId(11), NodeId(12)]),
+    };
+    assert_eq!(replica.read_log(Seq(1), 10, usize::MAX), moved);
+    assert!(matches!(
+        replica.read_log(Seq(0), 10, usize::MAX),
+        LogRead::Page(_)
+    ));
+    let asked = replica.counters().catch_up_requests;
+    replica.step(beat);
+    assert_eq!(
+        replica.counters().catch_up_requests,
+        asked,
+        "a moved replica pulls nothing"
+    );
+    let ready = replica.ready();
+    assert!(
+        ready
+            .messages()
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::SegmentHeld { .. })),
+        "a moved replica reports nothing held"
+    );
+    ready.advance();
+    let rebooted = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert!(rebooted.replica().is_moved(), "a reboot keeps the move");
+    assert_eq!(rebooted.chosen_at(Slot(2)), None);
+    assert_eq!(rebooted.read_log(Seq(1), 10, usize::MAX), moved);
+}
+
+/// A `SetReplicas` that keeps this replica in, or names another segment,
+/// does not end the segment for it: the walk goes on.
+#[test]
+fn a_set_replicas_that_keeps_the_replica_or_names_another_segment_moves_nothing() {
+    let mut disk = MemStorage::new(multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, set_replicas(0, &[10, 11])));
+    replica.step(commit(1, set_replicas(1, &[11])));
+    replica.step(commit(2, write(7)));
+    assert_eq!(
+        drain(&mut replica, &mut disk),
+        vec![Slot(0), Slot(1), Slot(2)]
+    );
+    assert!(!replica.replica().has_ended());
+    assert!(matches!(
+        replica.read_log(Seq(0), 10, usize::MAX),
+        LogRead::Page(_)
+    ));
+}
+
+/// The peers of a replica follow its fold (D10): after it walked a
+/// `SetReplicas` of its segment, it pulls from the new set; once sealed by
+/// a `Roll` that names the set of the next segment, its peers stay the set
+/// of its own segment at its end.
+#[test]
+fn the_peers_of_a_replica_are_the_set_its_fold_gives_its_segment() {
+    let set = |members: &[u64]| {
+        crate::journal::segment::ReplicaSet::new(members.iter().copied().map(NodeId))
+    };
+    let mut disk = MemStorage::new(peer_config(10));
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, set_replicas(0, &[10, 12])));
+    let _ = drain(&mut replica, &mut disk);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(3),
+        state: boundary(),
+        first_seq: Seq(0),
+    });
+    let pulls = sent(&mut replica, &mut disk);
+    assert_eq!(
+        pulls,
+        vec![(
+            Audience::ReplicasOf {
+                segment: SegmentId::FIRST,
+                replicas: set(&[12]),
+            },
+            Message::CatchUpRequest {
+                from: NodeId(10),
+                from_slot: Slot(1),
+            }
+        )],
+        "the pull goes to the new set, not to the old peer 11"
+    );
+
+    replica.step(commit(
+        1,
+        Command::Roll(Roll {
+            next: SegmentId(1),
+            replicas: Some(set(&[13])),
+        }),
+    ));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(replica.replica().is_sealed());
+    let ask = |from: u64| Message::CatchUpRequest {
+        from: NodeId(from),
+        from_slot: Slot(0),
+    };
+    replica.step(ask(13));
+    assert_eq!(
+        sent(&mut replica, &mut disk),
+        Vec::new(),
+        "a replica of the next segment is not a peer"
+    );
+    replica.step(ask(12));
+    assert_eq!(
+        sent(&mut replica, &mut disk).len(),
+        1,
+        "a member of the set at the end is served"
+    );
+}

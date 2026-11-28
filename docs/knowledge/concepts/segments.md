@@ -170,8 +170,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
   sealed one), the rule that Pierre adopted on 2026-11-27, modelled in
   `specs/tla/held-reseat/`, has the held tally count
   only whole reports of the set in force made at the version of the set in force, and judge the
-  segment again at each new version; a removed replica keeps its copy until then. It is not
-  built: no code changes a set yet.
+  segment again at each new version; a removed replica keeps its copy until then. The
+  `SetReplicas` of the open segment is built (`Command::SetReplicas`,
+  `ColocatedNode::set_replicas`): the leader routes each later slot to the new set, a removed
+  replica stops at it and answers a read above it `LogRead::Moved`, and the tally counts the
+  set that the fold gives at the `Roll`, which is final then. The version stamp comes with the
+  heal of a sealed segment, which is not built.
 
 ## 10. Pitfalls
 

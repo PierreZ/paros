@@ -50,7 +50,10 @@ fn replica(commands: &[Command]) -> Held {
 fn page(read: LogRead) -> super::LogPage {
     match read {
         LogRead::Page(page) => page,
-        LogRead::Truncated(_) | LogRead::NotHeld | LogRead::Sealed { .. } => {
+        LogRead::Truncated(_)
+        | LogRead::NotHeld
+        | LogRead::Sealed { .. }
+        | LogRead::Moved { .. } => {
             panic!("expected a page")
         }
     }

@@ -228,8 +228,14 @@ Test only: `publish = false`, never a dependency of another crate.
   replicas of the first segment (`segment-replicas`, `Config::segment_replicas`: they report it
   held, the acceptors drop its unreleased records at the `Hold`, a replica that lagged while
   a `Truncate` released it stops as trimmed, and the last site sleeps until the settle rounds
-  (`Flavor::sleeper`), so that only a peer can serve it when it boots (`PEER_ONLY`); the
-  liveness judge takes a sealed replica as done at its end and a trimmed one as done), and the journal controller (`healing`: matchmakers,
+  (`LastSite::Sleeper`), so that only a peer can serve it when it boots (`PEER_ONLY`); the
+  liveness judge takes a sealed replica as done at its end and a trimmed one as done), the same
+  walk with four replica sites (`segment-reseat`, `LastSite::Added`: the first three are the
+  replicas of the first segment, the last sleeps until the settle rounds, and a quarter of the
+  proposals are the `SetReplicas` that replaces the first site by the last, while the leader's
+  tail is the first segment; it must reach an admitted `SetReplicas`, a removed replica that
+  stops there and an added one that seals its segment; the liveness judge takes a removed replica
+  as done at its stop, and asks nothing of a site that no set of its segment named), and the journal controller (`healing`: matchmakers,
   three spares and two controllers; a member stops for good at the calm, and the controllers
   replace it and retire the spare that leaves; the operator makes no move). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of

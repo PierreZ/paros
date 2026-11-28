@@ -3,7 +3,7 @@
 use crate::types::{FNV_OFFSET, Fingerprint, Value, Weigh, fnv1a};
 
 use super::ids::{LeaderUuid, Seq};
-use super::segment::{Hold, ReplicaSet, Roll};
+use super::segment::{Hold, ReplicaSet, Roll, SetReplicas};
 
 /// A journal **`Write`** as it is decided into one slot (#204): the batch
 /// `records`, to be accepted at position `seq` iff `leader` is the
@@ -93,7 +93,8 @@ pub enum Control {
 }
 
 /// What a single log slot decides: a client's [`Entry`] (a journal `Write`)
-/// a paros-interpreted [`Control`] command, or a [`Roll`].
+/// a paros-interpreted [`Control`] command, a [`Roll`], a [`Hold`] or a
+/// [`SetReplicas`].
 ///
 /// This is the per-slot value the whole protocol carries (in `Accept`,
 /// `Promise`, `Commit`, catch-up, and the durable accepted log). Only the
@@ -114,6 +115,10 @@ pub enum Command {
     /// by a leader whose held tally marked the segment. Its own variant for
     /// the same reason as [`Command::Roll`].
     Hold(Hold),
+    /// The new replicas of the open segment (§4.7, D10), proposed only by
+    /// [`crate::ColocatedNode::set_replicas`]. Its own variant for the same
+    /// reason as [`Command::Roll`].
+    SetReplicas(SetReplicas),
 }
 
 impl Fingerprint for Command {
@@ -124,10 +129,11 @@ impl Fingerprint for Command {
 
 impl Weigh for Command {
     /// A write weighs its records' bytes, the measure of a read's
-    /// `max_bytes`. A control command, a `Roll` and a `Hold` carry no
-    /// client bytes and weigh nothing: the weight bounds what clients put
-    /// in the log, a `Roll` is an operator's call whose replica set is a
-    /// few ids, and a `Hold` is three scalars.
+    /// `max_bytes`. A control command, a `Roll`, a `Hold` and a
+    /// `SetReplicas` carry no client bytes and weigh nothing: the weight
+    /// bounds what clients put in the log, a `Roll` and a `SetReplicas` are
+    /// an operator's calls whose replica set is a few ids, and a `Hold` is
+    /// three scalars.
     fn weight(&self) -> u64 {
         match self {
             Self::Write(entry) => {
@@ -142,7 +148,7 @@ impl Weigh for Command {
                 );
                 bytes
             }
-            Self::Control(_) | Self::Roll(_) | Self::Hold(_) => 0,
+            Self::Control(_) | Self::Roll(_) | Self::Hold(_) | Self::SetReplicas(_) => 0,
         }
     }
 }
@@ -201,6 +207,16 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             let hash = fnv1a(hash, &end.0.to_le_bytes());
             fnv1a(hash, &next_seq.0.to_le_bytes())
         }
+        Command::SetReplicas(SetReplicas { segment, replicas }) => {
+            let hash = fnv1a(FNV_OFFSET, &[6]);
+            let mut hash = fnv1a(hash, &segment.0.to_le_bytes());
+            let members = replicas.members();
+            hash = fnv1a(hash, &(members.len() as u64).to_le_bytes());
+            for member in members {
+                hash = fnv1a(hash, &member.0.to_le_bytes());
+            }
+            hash
+        }
     }
 }
 
@@ -210,7 +226,9 @@ impl Command {
     pub fn write(&self) -> Option<&Entry> {
         match self {
             Command::Write(entry) => Some(entry),
-            Command::Control(_) | Command::Roll(_) | Command::Hold(_) => None,
+            Command::Control(_) | Command::Roll(_) | Command::Hold(_) | Command::SetReplicas(_) => {
+                None
+            }
         }
     }
 }

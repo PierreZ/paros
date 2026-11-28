@@ -50,6 +50,7 @@ fn flavors() -> Vec<(&'static str, Flavor)> {
         ("handover", Flavor::handover()),
         ("segments", Flavor::segments()),
         ("segment-replicas", Flavor::segment_replicas()),
+        ("segment-reseat", Flavor::segment_reseat()),
         ("healing", Flavor::healing()),
         ("compartments-paged", Flavor::compartments().paged()),
         ("reconfiguring-paged", Flavor::reconfiguring().paged()),

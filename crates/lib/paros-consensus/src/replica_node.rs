@@ -340,6 +340,7 @@ impl ReplicaNode {
             &below,
         );
         replica.set_apply_page(limits.apply_page);
+        replica.set_member(config.id);
         // A replica keeps one segment (R6): the segment of its base, the
         // first one, or the one it joined (`join_segment`, durable as the
         // trim point it wrote).
@@ -369,8 +370,9 @@ impl ReplicaNode {
         for (slot, record) in above {
             // A record past the end of a sealed segment is not this
             // replica's: the walk that sealed it dropped it, and a reboot
-            // leaves it too.
-            if node.replica.is_sealed() {
+            // leaves it too. So does a record past the `SetReplicas` that
+            // moved it.
+            if node.replica.has_ended() {
                 break;
             }
             let command = record.1.clone();
@@ -443,7 +445,7 @@ impl ReplicaNode {
                     assert!(
                         slot < self.floor
                             || self.replica.is_chosen(slot)
-                            || self.replica.sealed_end().is_some_and(|end| slot >= end),
+                            || self.replica.ended_at().is_some_and(|end| slot >= end),
                         "a taught decision is held chosen, lies below the floor or past the end"
                     );
                 } else {
@@ -675,8 +677,10 @@ impl ReplicaNode {
             self.learn_read_basis(config, ballot, fence);
         }
         self.learn_config(ballot, config);
-        // A sealed replica holds its whole segment: it pulls nothing more.
-        if commit > self.replica.chosen_index() && !self.replica.is_sealed() && !self.trimmed {
+        // A sealed replica holds its whole segment, and a moved one holds
+        // its part (D10): neither pulls anything more (the rule `Pull` of
+        // `specs/tla/segment-reseat/` asks `~Out(r)`).
+        if commit > self.replica.chosen_index() && !self.replica.has_ended() && !self.trimmed {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
         self.report_held(from);
@@ -832,12 +836,18 @@ impl ReplicaNode {
         );
     }
 
-    /// Drop the records past the end of a sealed segment: the walk that
-    /// sealed the replica dropped those slots, which are not its own.
+    /// Drop the records past the end of a sealed segment, or past the
+    /// `SetReplicas` that moved the replica: the walk that ended there
+    /// dropped those slots, which are not its own.
     fn drop_past_end(&mut self) {
-        let Some(end) = self.replica.sealed_end() else {
+        let Some(end) = self.replica.ended_at() else {
             return;
         };
+        probe!(
+            sometimes,
+            self.replica.is_moved(),
+            "replica: a replica stops at a SetReplicas that leaves it out"
+        );
         let past = self.records.split_off(&end);
         let dropped: u64 = past.values().map(|(_, command)| command.weight()).sum();
         assert!(
@@ -944,7 +954,7 @@ impl ReplicaNode {
         }
         // A trim point of another segment, or one a sealed replica does not
         // need, would carry this replica out of the segment it keeps (R6).
-        if self.replica.is_sealed() || Some(state.segment.id) != self.replica.segment_bound() {
+        if self.replica.has_ended() || Some(state.segment.id) != self.replica.segment_bound() {
             self.counters.past_end += 1;
             // A lagging replica of a segment that a `Truncate` released gets
             // only trim points of later segments: the acceptors dropped the
@@ -953,7 +963,7 @@ impl ReplicaNode {
             // nothing left to hold (`TrimProof` of
             // `specs/tla/held-floor-trimmed/`).
             if let Some(bound) = self.replica.segment_bound()
-                && !self.replica.is_sealed()
+                && !self.replica.has_ended()
                 && !self.trimmed
                 && state.is_well_formed()
                 && state.releases(bound, first_seq)
@@ -968,7 +978,7 @@ impl ReplicaNode {
                     self.replica.segment_bound() == Some(bound),
                     "a trimmed replica keeps the segment it found released"
                 );
-            } else if self.replica.segment_bound().is_some() && !self.replica.is_sealed() {
+            } else if self.replica.segment_bound().is_some() && !self.replica.has_ended() {
                 // The trim point names a later segment: the floor of a
                 // replica lies at or above the start of its segment, so a
                 // trim point of an earlier one was ignored above. The
@@ -1075,14 +1085,27 @@ impl ReplicaNode {
     }
 
     /// The other replicas of the segment this replica keeps (R8): the set
-    /// that its base names (the `Roll` that opened the segment), else the
-    /// bootstrap set of the first segment. Empty when it keeps no segment.
+    /// that its own fold gives the segment at its head (the `Roll` that
+    /// opened the segment, or a later `SetReplicas` of it, D10), at the
+    /// `Roll` that ends it once sealed, else the bootstrap set of the first
+    /// segment. So a new member that has not walked the `SetReplicas` yet
+    /// pulls from the old set, whose members hold every slot up to it, and
+    /// from the new set once it walked it. Empty when it keeps no segment.
     fn segment_peers(&self) -> Vec<NodeId> {
         if self.replica.segment_bound().is_none() {
             return Vec::new();
         }
-        let base = self.replica.journal_base();
-        let set = base
+        let head = match self.replica.sealed_end() {
+            // The state that the `Roll` was judged in: the set of the
+            // segment at its end, never the set of the next one.
+            Some(end) => self.replica.journal_at(Slot(end.0 - 1)),
+            None => self.replica.journal(),
+        };
+        assert!(
+            Some(head.segment.id) == self.replica.segment_bound(),
+            "the peers come from a state of the segment this replica keeps"
+        );
+        let set = head
             .replicas
             .as_ref()
             .or(self.config.segment_replicas.as_ref());
@@ -1130,7 +1153,10 @@ impl ReplicaNode {
             return;
         }
         assert!(!self.trimmed, "a trimmed replica pulls nothing");
-        assert!(!self.replica.is_sealed(), "a sealed replica pulls nothing");
+        assert!(
+            !self.replica.has_ended(),
+            "a sealed or moved replica pulls nothing"
+        );
         let count = peers.len() as u64;
         let to = peers[usize::try_from(self.peer_turn % count).expect("a small set")];
         assert!(to != self.config.id, "a replica never pulls from itself");
@@ -1227,8 +1253,9 @@ impl ReplicaNode {
         if slot < self.floor {
             return;
         }
-        // Past the end of the segment this replica keeps (R6): not its own.
-        if self.replica.sealed_end().is_some_and(|end| slot >= end) {
+        // Past the end of the segment this replica keeps (R6), or past the
+        // `SetReplicas` that moved it (D10): not its own.
+        if self.replica.ended_at().is_some_and(|end| slot >= end) {
             self.counters.past_end += 1;
             return;
         }

@@ -11,5 +11,5 @@ pub mod state;
 pub use chain::{Chain, Opening, SegmentRecord};
 pub use command::{Command, Control, Entry, command_fingerprint};
 pub use ids::{JournalId, JournalIdentifier, LeaderUuid, Seq, TenantId};
-pub use segment::{Hold, ReplicaSet, ReplicaSetError, Roll, Segment, SegmentId};
+pub use segment::{Hold, ReplicaSet, ReplicaSetError, Roll, Segment, SegmentId, SetReplicas};
 pub use state::{JournalState, JournalView, Outcome, WriterMode};

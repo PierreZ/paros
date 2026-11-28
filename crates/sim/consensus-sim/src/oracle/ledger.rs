@@ -360,11 +360,19 @@ impl Ledger {
         let mut expected = (SegmentId::FIRST, first.cloned());
         for s in 0..slot.0 {
             let (_, outcome) = self.journal.judge(Slot(s), lookup);
-            if let (Outcome::Rolled(tail), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s))) {
-                expected.0 = tail.id;
-                if roll.replicas.is_some() {
-                    expected.1.clone_from(&roll.replicas);
+            match (outcome, lookup(Slot(s))) {
+                (Outcome::Rolled(tail), Some(Command::Roll(roll))) => {
+                    expected.0 = tail.id;
+                    if roll.replicas.is_some() {
+                        expected.1.clone_from(&roll.replicas);
+                    }
                 }
+                // A valid `SetReplicas` gives the tail its set from the
+                // next slot (D10).
+                (Outcome::Reseated(_), Some(Command::SetReplicas(set))) => {
+                    expected.1 = Some(set.replicas.clone());
+                }
+                _ => {}
             }
         }
         assert!(
@@ -412,7 +420,8 @@ impl Ledger {
 
     /// The journal view after the chosen `Roll` at `slot`, and the replicas
     /// the chosen log names for the segment it opens: those of the last
-    /// valid `Roll` at or below `slot` that named a set. The caller knows
+    /// valid `Roll` that named a set or valid `SetReplicas` at or below
+    /// `slot`. The caller knows
     /// every slot up to `slot` is chosen.
     fn boundary_after(&mut self, slot: Slot) -> (JournalView, u64, Option<ReplicaSet>) {
         let (chosen, commands) = (&self.chosen, &self.commands);
@@ -426,10 +435,14 @@ impl Ledger {
             if matches!(outcome, Outcome::Leader(_)) {
                 term += 1;
             }
-            if let (Outcome::Rolled(_), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s)))
-                && roll.replicas.is_some()
-            {
-                replicas.clone_from(&roll.replicas);
+            match (outcome, lookup(Slot(s))) {
+                (Outcome::Rolled(_), Some(Command::Roll(roll))) if roll.replicas.is_some() => {
+                    replicas.clone_from(&roll.replicas);
+                }
+                (Outcome::Reseated(_), Some(Command::SetReplicas(set))) => {
+                    replicas = Some(set.replicas.clone());
+                }
+                _ => {}
             }
         }
         (view, term, replicas)

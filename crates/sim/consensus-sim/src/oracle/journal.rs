@@ -49,6 +49,7 @@ use std::collections::BTreeMap;
 use paros_consensus::Slot;
 use paros_consensus::journal::{
     Command, Control, Entry, Hold, JournalView, LeaderUuid, Outcome, Segment, SegmentId, Seq,
+    SetReplicas,
 };
 
 /// The oracle: every party folds a slot to the outcome the journal rules
@@ -158,6 +159,7 @@ impl JournalSpec {
             Command::Control(Control::Noop) => Outcome::Noop,
             Command::Roll(roll) => self.roll(slot, roll.next),
             Command::Hold(hold) => self.hold(*hold),
+            Command::SetReplicas(set) => self.set_replicas(set),
             Command::Write(entry) => self.write(entry),
             Command::Control(Control::SetLeader { new, old }) => self.set_leader(*new, *old),
             Command::Control(Control::Truncate { leader, up_to }) => self.truncate(*leader, *up_to),
@@ -220,6 +222,16 @@ impl JournalSpec {
         self.segment = next.0;
         self.segment_start = slot.0 + 1;
         Outcome::Rolled(self.tail())
+    }
+
+    /// A `SetReplicas` is valid only for the tail segment, and moves no
+    /// scalar the spec keeps: the set itself is the route's, which the
+    /// oracle of the segment replicas judges.
+    fn set_replicas(&self, set: &SetReplicas) -> Outcome {
+        if set.segment.0 != self.segment {
+            return Outcome::ReseatIgnored(self.tail());
+        }
+        Outcome::Reseated(set.replicas.clone())
     }
 
     fn hold(&mut self, hold: Hold) -> Outcome {

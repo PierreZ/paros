@@ -72,6 +72,11 @@
 //!   replicas of its segment hold it, and the acceptors may drop it. The
 //!   answer is a function of the chosen prefix, so every node gives it
 //!   (`OneAnswer` of `specs/tla/held-floor-hold/`).
+//! - **`SetReplicas(segment, replicas)`** ([`Command::SetReplicas`], D10 of
+//!   §4.7) gives the tail segment new replicas: it is valid iff `segment` is
+//!   the tail, and then [`JournalState::replicas`] is the new set from the
+//!   slot after it ([`Outcome::Reseated`]). Any other `SetReplicas` changes
+//!   nothing ([`Outcome::ReseatIgnored`]).
 //!
 //! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
 //! carried by the store's sealed state and a trim-point jump, and never
@@ -90,6 +95,7 @@
 
 use crate::journal::{
     Command, Control, Entry, Hold, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+    SetReplicas,
 };
 use crate::types::Slot;
 
@@ -134,7 +140,8 @@ pub struct JournalState {
     #[cfg_attr(feature = "serde", serde(default))]
     pub segment: Segment,
     /// The replicas of the tail segment that the last valid `Roll` naming a
-    /// set named (R6, D4 of §4.7): a `Roll` with no set keeps the set of the
+    /// set or the last valid `SetReplicas` named, whichever came later (R6,
+    /// D4 and D10 of §4.7): a `Roll` with no set keeps the set of the
     /// segment before it. `None` until a `Roll` named one: the replicas of
     /// the first segment, which the bootstrap configuration names
     /// ([`crate::contract::Config::segment_replicas`]), keep every segment
@@ -218,6 +225,11 @@ pub enum Outcome {
     RollIgnored(Segment),
     /// A valid `Hold`: the held prefix after it.
     HeldTo(Hold),
+    /// A valid `SetReplicas`: the replicas of the tail segment after it.
+    Reseated(ReplicaSet),
+    /// A `SetReplicas` that does not name the tail segment: nothing moved.
+    /// The segment is the tail it was judged against.
+    ReseatIgnored(Segment),
     /// A `Hold` that does not extend the held prefix: nothing moved. It
     /// names the held prefix it was judged against.
     HoldIgnored(Option<Hold>),
@@ -375,6 +387,7 @@ impl JournalState {
             | Outcome::Duplicate { .. }
             | Outcome::RollIgnored(_)
             | Outcome::HoldIgnored(_)
+            | Outcome::ReseatIgnored(_)
             | Outcome::Held(_)
             | Outcome::Noop => {
                 assert!(*self == *before, "a refused or no-op command moves nothing");
@@ -431,9 +444,10 @@ impl JournalState {
                 );
                 assert!(self.term == before.term, "a Roll keeps the term");
             }
-            Outcome::HeldTo(_) => {}
+            Outcome::HeldTo(_) | Outcome::Reseated(_) => {}
         }
         self.assert_held(before, outcome);
+        self.assert_replicas(before, outcome);
         // The refusals name the view they were judged against.
         if let Outcome::Refused(judged)
         | Outcome::Truncated(judged)
@@ -481,6 +495,38 @@ impl JournalState {
                 "a Hold moves no position, no leader and no segment"
             );
             assert!(self.term == before.term, "a Hold keeps the term");
+        }
+    }
+
+    /// The replicas' postconditions: only a valid `Roll` or a valid
+    /// `SetReplicas` moves them, a valid `SetReplicas` moves nothing else and
+    /// reports the set after it, and an ignored one names the tail it was
+    /// judged against.
+    fn assert_replicas(&self, before: &Self, outcome: &Outcome) {
+        if self.replicas != before.replicas {
+            assert!(
+                matches!(outcome, Outcome::Rolled(_) | Outcome::Reseated(_)),
+                "only a valid Roll or SetReplicas moves the replicas"
+            );
+        }
+        if let Outcome::Reseated(set) = outcome {
+            assert!(
+                self.replicas.as_ref() == Some(set),
+                "a valid SetReplicas reports the replicas after it"
+            );
+            assert!(
+                self.view() == before.view()
+                    && self.segment == before.segment
+                    && self.held == before.held,
+                "a SetReplicas moves no position, no leader, no segment and no held prefix"
+            );
+            assert!(self.term == before.term, "a SetReplicas keeps the term");
+        }
+        if let Outcome::ReseatIgnored(judged) = outcome {
+            assert!(
+                *judged == before.segment,
+                "an ignored SetReplicas names the tail it was judged against"
+            );
         }
     }
 
@@ -594,6 +640,33 @@ impl JournalState {
         Outcome::HeldTo(hold)
     }
 
+    /// A `SetReplicas`: valid iff it names the tail segment (D10 of §4.7).
+    /// The fold of the chosen prefix is the same on every node, so every
+    /// node gives each slot the same set, and a leader routes the `Commit`
+    /// of a slot to the set that its fold gives there (`Route = "fold"` of
+    /// `specs/tla/segment-reseat/`; its control `route_proposed`, a route
+    /// by the proposed command, puts a slot at a replica that no chosen set
+    /// names).
+    fn apply_set_replicas(&mut self, set: &SetReplicas) -> Outcome {
+        if set.segment != self.segment.id {
+            return Outcome::ReseatIgnored(self.segment);
+        }
+        probe!(
+            reachable,
+            "journal: a SetReplicas gives the tail new replicas"
+        );
+        self.replicas = Some(set.replicas.clone());
+        assert!(
+            self.replicas.as_ref() == Some(&set.replicas),
+            "a valid SetReplicas gives its set to the tail"
+        );
+        assert!(
+            set.segment == self.segment.id,
+            "a valid SetReplicas names the tail"
+        );
+        Outcome::Reseated(set.replicas.clone())
+    }
+
     /// The verdict on `command` under `mode`, the state moved accordingly.
     ///
     /// Proved in simulation (#241): a single-writer journal that takes an
@@ -612,6 +685,7 @@ impl JournalState {
             (_, Command::Control(Control::Noop)) => Outcome::Noop,
             (_, Command::Roll(roll)) => self.apply_roll(slot, roll),
             (_, Command::Hold(hold)) => self.apply_hold(*hold),
+            (_, Command::SetReplicas(set)) => self.apply_set_replicas(set),
             (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
                 Outcome::WrongMode(self.view())
             }

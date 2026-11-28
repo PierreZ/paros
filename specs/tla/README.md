@@ -2997,8 +2997,9 @@ no more and answers a read above it with "moved". The slots are chosen in any or
 `SetAt` holds the `SetReplicas` or a `Noop` of a new leader. `Sound` is the safety (a replica
 holds only chosen slots, and only a replica that a set named holds any; a read is served from the
 walked prefix); `Whole` and `Answered` are the liveness, under fair steps. The join from the
-boundary state of the chain is `compartments/`. The rule is a proposal, modelled and not built:
-`Command::SetReplicas` is not in the code yet.
+boundary state of the chain is `compartments/`. The rule is built in step 5d of the segments in
+the core: `Command::SetReplicas`, `ColocatedNode::set_replicas`, and `Replica::moved_to` with
+`LogRead::Moved` at a `ReplicaNode`; the walk `segment-reseat` of `consensus-sim` runs it.
 
 | Check | CI | Result |
 |---|---|---|
