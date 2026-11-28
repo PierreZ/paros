@@ -3021,10 +3021,10 @@ the members of the set before it that the new set leaves out. A replica is out o
 its walk names it removed; it then pulls and walks no more. A `SetReplicas` that names a removed
 member again is refused (`Outcome::ReseatRemoved`). The slots are chosen in any order, a slot of
 `SetSlots` holds its `SetReplicas` or a `Noop` of a new leader, the leader routes each `Commit` to
-the set that the fold gives before its slot, and a replica that a set named pulls any chosen slot
-while it is not out. `Sound` is the safety (a replica holds only chosen slots, only a replica that
-a set named holds any, with the refusal no removed member is in the set, and the removed members
-only grow); `Whole` is the liveness: every member of the set in force walks the whole segment.
+the set that the fold gives before its slot, and a replica that a set named pulls any chosen slot.
+`Sound` is the safety (a replica holds only chosen slots, only a replica that a set named holds
+any, with the refusal no removed member is in the set, the removed members only grow, and a
+removed member walks to the `SetReplicas` that removed it and no slot past it); `Whole` is the liveness: every member of the set in force walks the whole segment.
 `segment-reseat/` checks one `SetReplicas` with its route and its reads. The rule is built in
 `journal/state.rs` (`apply_set_replicas`) and `replica.rs` (`Replica::moved_to`); the walk
 `segment-reseat` of `consensus-sim` runs it, and `MOVED_TRUE` judges each stop.

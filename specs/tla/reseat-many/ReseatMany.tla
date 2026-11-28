@@ -14,8 +14,8 @@
 (* `SetSlots` holds its `SetReplicas` `Prop[s]` or, after a change of      *)
 (* leader, a `Noop`. The set at the open of the segment is `Old`. The      *)
 (* leader routes the `Commit` of slot s to the set that the fold gives     *)
-(* before s (`Route = "fold"` of `segment-reseat/`). A replica pulls any chosen slot while it is not     *)
-(* out, and walks its contiguous prefix while it is not out.               *)
+(* before s (`Route = "fold"` of `segment-reseat/`). A replica pulls any  *)
+(* chosen slot, and walks its contiguous prefix while it is not out.       *)
 (*                                                                         *)
 (* Constants (each rule with a control):                                   *)
 (*   Refuse  TRUE: a `SetReplicas` that names a removed member is refused  *)
@@ -105,12 +105,13 @@ Commit(s, r) ==
   /\ holds' = [holds EXCEPT ![r] = @ \cup {s}]
   /\ UNCHANGED <<chosen, isSet, walk>>
 
-\* Replica r, which a set named and which is not out, pulls the chosen
-\* slot s from the acceptors or a peer.
+\* Replica r, which a set named, pulls the chosen slot s from the
+\* acceptors or a peer. A replica that is out may still hold a slot past
+\* its stop; it never walks it (the core drops it, which the model leaves
+\* out).
 CatchUp(s, r) ==
   /\ s \in chosen
   /\ r \in WasIn
-  /\ ~Out(r)
   /\ holds' = [holds EXCEPT ![r] = @ \cup {s}]
   /\ UNCHANGED <<chosen, isSet, walk>>
 
@@ -133,6 +134,12 @@ Fairness ==
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
+\* A removed member stops at the `SetReplicas` that removed it: its walk
+\* reaches that slot and no slot past it.
+Stops ==
+  OutRule = "removed" =>
+    \A r \in Reps : Out(r) => walk[r] > 0 /\ r \notin Fold(walk[r] - 1)[2]
+
 \* Sound: a replica holds only chosen slots and walks only slots it holds;
 \* only a replica that a set named holds any; with the refusal, no removed
 \* member is in the set, and a member stays removed for the rest of the
@@ -143,6 +150,7 @@ Sound ==
   /\ \A r \in Reps \ WasIn : holds[r] = {}
   /\ Refuse => \A k \in 0..N : Fold(k)[1] \cap Fold(k)[2] = {}
   /\ \A k \in 1..N : Fold(k - 1)[2] \subseteq Fold(k)[2]
+  /\ Stops
 
 \* Heals: every member of the set in force walks the whole segment.
 Whole == <>[](\A r \in InForce : walk[r] = N)
