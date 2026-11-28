@@ -156,7 +156,8 @@ Test only: `publish = false`, never a dependency of another crate.
     feedback in four is lost), the fresh controller observes each round at once and the stale
     one `LAG` rounds late, both decide with `controller::evaluate` under `POLICY`, and the driver
     carries each order with `reconfigure`, `check_retirement` and `may_retire`. Rule 6 orders no
-    more once the matchmakers checked a node, so the driver keeps each `Retire` it carried and
+    more once the matchmakers checked a node at the floor in force (a check at an earlier
+    floor does not count: the check binds to the belief of its floor), so the driver keeps each `Retire` it carried and
     calls the node's `may_retire` at each tick until the node retires (`finish_retirements`). At the calm, one
     member of the configuration in force stops for good (`stop_for_good`). The last node of the
     pool is never offered as a spare, so rule 6 retires it once a floor is effective.

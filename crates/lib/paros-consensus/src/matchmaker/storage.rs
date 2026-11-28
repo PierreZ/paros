@@ -135,10 +135,11 @@ impl MemRegistry {
                 self.registry.insert(*ballot, registration.clone());
             }
             MatchmakerWriteOp::SetGcWatermark { watermark } => {
-                if *watermark > self.hard_state.gc_watermark() {
-                    self.hard_state.journal.gc_watermark = *watermark;
-                    self.collect();
-                }
+                // The store keeps the higher of the two watermarks, so a
+                // lower or equal one changes nothing.
+                let raised = (*watermark).max(self.hard_state.gc_watermark());
+                self.hard_state.journal.gc_watermark = raised;
+                self.collect();
                 assert!(
                     self.hard_state.gc_watermark() >= *watermark,
                     "a persisted watermark covers the raise"

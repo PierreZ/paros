@@ -12,7 +12,7 @@
 //! | 3 | No set of the latest generation that the fresh, active matchmakers report has a majority of its own members that report it, or one of them reports a configuration in force above the one `L` believes | Hold: [`HoldReason::Matchmakers`] |
 //! | 4 | The fresh members of `C` are not a Phase-1 quorum of `C` | Hold: [`HoldReason::Phase1Lost`] |
 //! | 5 | A column of `C` has no Phase-2 quorum of fresh members | No hold by itself: a lost column is a hold only when Phase 1 is lost too, which is rule 4 (Pierre, 2026-11-26) |
-//! | 6 | `L` made the GC floor `w` effective, and a fresh node outside `C` that is not a spare of the caller may retire at `w` once the matchmakers checked it | Order: [`Order::Retire`] |
+//! | 6 | `L` made the GC floor `w` effective, and a fresh node outside `C` that is not a spare of the caller may retire at `w` and the matchmakers have not checked it at `w` | Order: [`Order::Retire`] |
 //! | 7 | No member of `C` is both silent for the leader and without fresh feedback | [`Decision::Steady`] |
 //! | 8 | `L` is not settled | Hold: [`HoldReason::Unsettled`] |
 //! | 9 | A configuration other than `C` is still in force | Hold: [`HoldReason::GcNotEffective`] |
@@ -168,7 +168,10 @@ fn matchmakers_hold(view: &View, policy: &Policy, leader: &NodeFeedback) -> bool
 }
 
 /// Rule 6: the fresh nodes outside `C` that may retire at the effective
-/// floor once the matchmakers checked them, lowest first.
+/// floor and that the matchmakers have not checked at that floor, lowest
+/// first. A check binds to the belief of its floor, so a node that the
+/// matchmakers checked at an earlier floor needs a new check: its durable
+/// `retire_mark` says nothing of the floor in force.
 fn retirable(
     view: &View,
     policy: &Policy,
@@ -192,7 +195,6 @@ fn retirable(
         .find(|node| {
             !config.contains(node.id)
                 && spares.iter().all(|spare| spare.node != node.id)
-                && !node.retire_mark.checked
                 && node
                     .insights
                     .contains(&NodeInsight::RetirementUnchecked { floor: *watermark })

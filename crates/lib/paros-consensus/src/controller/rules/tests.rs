@@ -326,6 +326,39 @@ fn rule_3_counts_no_matchmaker_of_another_set() {
 }
 
 #[test]
+fn rule_3_counts_no_member_that_reports_another_set_of_its_generation() {
+    let config = majority(&[1, 2, 3]);
+    let mut view = View::new();
+    view.observe_node(leader(&config, &[]));
+    view.observe_node(follower(2, &config));
+    view.observe_node(follower(3, &config));
+    view.observe_matchmaker(matchmaker(0, &config));
+    // Members 1 and 2 of the set {0, 1, 2} report another set of the same
+    // generation: their feedback is not of the set, so the set has one voter.
+    let other = MatchmakerSet::new(
+        MatchmakerGeneration(0),
+        vec![
+            MatchmakerId(1),
+            MatchmakerId(2),
+            MatchmakerId(4),
+            MatchmakerId(5),
+            MatchmakerId(6),
+        ],
+    );
+    for id in [1, 2] {
+        view.observe_matchmaker(MatchmakerFeedback {
+            set: other.clone(),
+            ..matchmaker(id, &config)
+        });
+    }
+    assert_eq!(
+        decide(&view),
+        Decision::Hold(HoldReason::Matchmakers),
+        "a member counts for a set only when it reports that set"
+    );
+}
+
+#[test]
 fn rule_3_an_inactive_matchmaker_of_a_later_generation_does_not_count() {
     let config = majority(&[1, 2, 3]);
     let mut view = view_of(&config, &[], &[1, 2, 3]);
@@ -445,6 +478,38 @@ fn rule_6_orders_the_retirement_of_a_node_outside_at_the_effective_floor() {
 }
 
 #[test]
+fn rule_6_orders_a_new_check_of_a_node_checked_on_an_earlier_floor() {
+    // The matchmakers checked node 4 on an earlier floor, and a new
+    // leadership moved its belief to the floor in force before it retired:
+    // its durable mark is checked, but it waits for a check at this floor.
+    let config = majority(&[1, 2, 3]);
+    let mut view = view_of(&config, &[], &[1, 2, 3]);
+    with_floor(&mut view, &config, LEADS);
+    view.observe_node(NodeFeedback {
+        retire_mark: RetireMark {
+            incarnation: 0,
+            checked: true,
+        },
+        ..outside(
+            4,
+            &config,
+            vec![
+                NodeInsight::Outside,
+                NodeInsight::RetirementUnchecked { floor: LEADS },
+            ],
+        )
+    });
+    assert_eq!(
+        decide(&view),
+        Decision::Order(Order::Retire {
+            node: NodeId(4),
+            watermark: LEADS,
+        }),
+        "a check on an earlier floor does not let the node retire at this one"
+    );
+}
+
+#[test]
 fn rule_6_orders_nothing_without_an_effective_floor_or_on_another_floor() {
     let config = majority(&[1, 2, 3]);
     let unchecked = vec![
@@ -460,7 +525,8 @@ fn rule_6_orders_nothing_without_an_effective_floor_or_on_another_floor() {
     with_floor(&mut view, &config, ballot(6, 1));
     view.observe_node(outside(4, &config, unchecked.clone()));
     assert_eq!(decide(&view), Decision::Steady);
-    // The node is checked already: its driver reads `may_retire`.
+    // The node is checked at the floor already: its driver reads
+    // `may_retire`.
     let mut view = view_of(&config, &[], &[1, 2, 3]);
     with_floor(&mut view, &config, LEADS);
     view.observe_node(NodeFeedback {
@@ -468,7 +534,14 @@ fn rule_6_orders_nothing_without_an_effective_floor_or_on_another_floor() {
             incarnation: 0,
             checked: true,
         },
-        ..outside(4, &config, unchecked.clone())
+        ..outside(
+            4,
+            &config,
+            vec![
+                NodeInsight::Outside,
+                NodeInsight::MayRetire { floor: LEADS },
+            ],
+        )
     });
     assert_eq!(decide(&view), Decision::Steady);
     // The node is stale.
